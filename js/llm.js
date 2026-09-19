@@ -163,7 +163,9 @@ function consumeLine(line, acc, onDelta) {
     if (error instanceof SyntaxError) return;
     throw error;
   }
-  accumulate(acc, json.choices?.[0]?.delta || json.choices?.[0]?.message);
+  const choice = json.choices?.[0];
+  if (choice?.finish_reason) acc.finishReason = choice.finish_reason;
+  accumulate(acc, choice?.delta || choice?.message);
   onDelta?.(snapshot(acc));
 }
 
@@ -179,6 +181,7 @@ function snapshot(acc) {
     content: acc.content,
     reasoning: acc.reasoning,
     toolCalls: acc.toolCalls.filter(Boolean).map((call) => ({ ...call })),
+    finishReason: acc.finishReason || null,
   };
 }
 
@@ -238,7 +241,6 @@ function isTransientMessage(text) {
 class TransientError extends Error {}
 
 const STALL_TIMEOUT_MS = 100000;
-const ATTEMPT_BUDGET_MS = 360000;
 const MAX_ATTEMPTS = 4;
 const RETRY_BUDGET_MS = 900000;
 
@@ -254,23 +256,18 @@ function abortError() {
 }
 
 // 单次请求 = 看门狗保护下的完整对话。看门狗只认“有意义的 data 行”：
-// 上游的注释行/keep-alive 空包不再喂饱计时器，假死 100 秒即掐断；
-// 单次尝试整体限时 6 分钟；瞬时错误由 streamChat 的重试预算统一兜底。
+// 上游的注释行/keep-alive 空包不喂计时器，假死 100 秒即掐断；
+// 数据仍在流动的长推理不设上限——真正的预算是对局时钟。
 async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
   const watchdog = new AbortController();
   let reason = null;
   let lastDataAt = Date.now();
-  const startedAt = Date.now();
   const markData = () => {
     lastDataAt = Date.now();
   };
   const stallTimer = setInterval(() => {
-    const idle = Date.now() - lastDataAt;
-    if (idle > STALL_TIMEOUT_MS) {
+    if (Date.now() - lastDataAt > STALL_TIMEOUT_MS) {
       reason = "stall";
-      watchdog.abort();
-    } else if (Date.now() - startedAt > ATTEMPT_BUDGET_MS) {
-      reason = "budget";
       watchdog.abort();
     }
   }, 3000);
@@ -304,7 +301,7 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
         3,
       );
     } catch (error) {
-      if (reason === "stall" || reason === "budget") throw new TransientError(`上游 ${reason === "stall" ? "100 秒无有效数据" : "单次请求超过 6 分钟"}，已掐断`);
+      if (reason === "stall") throw new TransientError("上游 100 秒无有效数据，已掐断");
       if (error instanceof TypeError) throw formatFetchError(error);
       throw error;
     }
@@ -339,8 +336,8 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
     }
     return await readStream(response, onDelta, markData);
   } catch (error) {
-    if (reason === "stall" || reason === "budget") {
-      throw new TransientError(reason === "stall" ? `流式响应 100 秒没有有效数据，已掐断重试` : `单次请求超过 6 分钟未完成，已掐断重试`);
+    if (reason === "stall") {
+      throw new TransientError("流式响应 100 秒没有有效数据，已掐断重试");
     }
     throw error;
   } finally {

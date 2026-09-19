@@ -25,6 +25,7 @@ function systemPrompt(side) {
     `你是中国象棋智能体，本局执${name}。裁判在本地，你不能用文字宣称已经走子。`,
     "每步消息都会附上全部合法着法：比较后直接调用 commit_move 提交其中一步，move 必须逐字来自该列表。",
     "需要复核盘面时才调用 look_board 或 legal_moves，不要重复查询。",
+    "分析务必精炼：列出 2-4 个候选并直接选定，不要长篇推演，尽快落子。",
     "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选。",
     "胜负由裁判裁定：将死、困毙、认输、违规、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
   ].join("\n");
@@ -431,21 +432,26 @@ export class Match {
       if (!calls.length) {
         failures += 1;
         messages.push({ role: "assistant", content: acc.content || "（没有调用工具）" });
-        this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · 未调用工具`;
+        const truncated = acc.finishReason === "length";
+        this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · ${truncated ? "输出超长被截断" : "未调用工具"}`;
         trace.push({
           id: `nudge-${step}`,
           kind: "tool",
           title: "裁判",
           body: "",
-          result: "没有工具调用。请调用 legal_moves，再调用 commit_move。",
+          result: truncated
+            ? "你的分析过长，输出被截断，未能落子。不要再写长分析，直接调用 commit_move 提交一步。"
+            : "没有工具调用。请调用 legal_moves，再调用 commit_move。",
           pending: false,
           ok: false,
         });
         this.emit();
-        if (failures >= MAX_FAILURES) return { kind: "forfeit", reason: "连续未调用工具" };
+        if (failures >= MAX_FAILURES) return { kind: "forfeit", reason: truncated ? "多次输出超长未落子" : "连续未调用工具" };
         messages.push({
           role: "user",
-          content: "你没有调用工具。请先调用 legal_moves，再调用 commit_move 或 resign。不要只用文字给出着法。",
+          content: truncated
+            ? "你上一轮的分析过长，输出在中途被截断，没有产生任何着法。不要再长篇推演，直接调用 commit_move 提交一步合法着法。"
+            : "你没有调用工具。请先调用 legal_moves，再调用 commit_move 或 resign。不要只用文字给出着法。",
         });
         continue;
       }
