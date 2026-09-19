@@ -52,6 +52,31 @@ function rootUrl(baseUrl) {
   return String(baseUrl || "").replace(/\/$/, "");
 }
 
+const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url, options, retries = 5) {
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, options);
+    } catch (error) {
+      if (error?.name === "AbortError" || attempt >= retries) throw error;
+      await wait(Math.min(1500 * 2 ** attempt, 12000));
+      continue;
+    }
+    if (!RETRY_STATUS.has(response.status) || attempt >= retries) return response;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const ms = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter, 15) * 1000
+      : Math.min(1500 * 2 ** attempt, 12000);
+    await wait(ms);
+  }
+}
+
 export function formatFetchError(error) {
   if (error?.name === "AbortError") return error;
   const message = String(error?.message || error || "");
@@ -199,10 +224,31 @@ export function normalizeCalls(acc) {
   return textToolCalls(`${acc.reasoning || ""}\n${acc.content || ""}`);
 }
 
-export async function streamChat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
+function isTransientChatError(error) {
+  if (error?.name === "AbortError") return false;
+  return /HTTP (408|429|500|502|503|504)|overloaded|temporar|rate.?limit|too many requests/i.test(
+    String(error?.message || ""),
+  );
+}
+
+export async function streamChat(options) {
+  let last;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      return await streamChatOnce(options);
+    } catch (error) {
+      if (!isTransientChatError(error)) throw error;
+      last = error;
+      await wait(Math.min(1500 * 2 ** attempt, 12000));
+    }
+  }
+  throw last;
+}
+
+async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
   let response;
   try {
-    response = await fetch(`${rootUrl(baseUrl)}/chat/completions`, {
+    response = await fetchWithRetry(`${rootUrl(baseUrl)}/chat/completions`, {
       method: "POST",
       signal,
       headers: {

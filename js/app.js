@@ -158,8 +158,8 @@ function paint() {
 function startMatch() {
   settings = ui.readSettings();
   saveSettings(settings);
-  if (!settings.apiKey) {
-    ui.toast("先在设置里填写 API Key");
+  if ((!settings.apiKey && !settings.red.key) || (!settings.apiKey && !settings.black.key)) {
+    ui.toast("先填写 API Key：全局一个，或红黑各自一个");
     ui.openSettings();
     return;
   }
@@ -183,13 +183,14 @@ function togglePause() {
 
 async function testApi() {
   const draft = ui.readSettings();
-  if (!draft.apiKey || !draft.baseUrl) {
+  const anyKey = draft.apiKey || draft.red.key || draft.black.key;
+  if (!anyKey || !draft.baseUrl) {
     ui.setTestResult("先填写接口地址和 API Key", false);
     return;
   }
   ui.setTestResult("正在连接…");
   try {
-    const result = await testConnection({ ...draft, model: draft.red.model });
+    const result = await testConnection({ ...draft, apiKey: anyKey, model: draft.red.model });
     if (result.models?.length) ui.setModels(result.models);
     ui.setTestResult(result.message, true);
   } catch (error) {

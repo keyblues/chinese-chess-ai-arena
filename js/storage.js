@@ -4,19 +4,21 @@ const MATCHES_KEY = "xq.matches";
 const MATCH_LIMIT = 30;
 
 export const defaultSettings = {
-  baseUrl: "https://api.siliconflow.cn/v1",
+  baseUrl: "https://openrouter.ai/api/v1",
   apiKey: "",
   temperature: 0.4,
   mainMinutes: 5,
   incrementSeconds: 15,
   red: {
     name: "红方",
-    model: "Qwen/Qwen3.8-27B",
+    model: "qwen/qwen3.8-27b:free",
+    key: "",
     style: "积极对攻，优先争取先手和攻势。",
   },
   black: {
     name: "黑方",
-    model: "tencent/Hy4-preview",
+    model: "deepseek/deepseek-v4-flash-0731:free",
+    key: "",
     style: "稳守反击，避免无补偿的兑子。",
   },
 };

@@ -141,8 +141,9 @@ export class Match {
     this.timer = 0;
   }
 
-  apiKey() {
-    return this.hooks.getSettings().apiKey;
+  apiKey(side) {
+    const player = this.players[side] || {};
+    return player.key || this.hooks.getSettings().apiKey;
   }
 
   snapshot() {
@@ -373,7 +374,7 @@ export class Match {
         this.emit();
         acc = await streamChat({
           baseUrl: this.baseUrl,
-          apiKey: this.apiKey(),
+          apiKey: this.apiKey(side),
           model: player.model,
           messages,
           tools: TOOLS,

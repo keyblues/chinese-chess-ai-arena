@@ -334,9 +334,11 @@ export function createUI(callbacks) {
     document.querySelector("#increment").value = settings.incrementSeconds;
     document.querySelector("#red-name").value = settings.red.name;
     document.querySelector("#red-model").value = settings.red.model;
+    document.querySelector("#red-key").value = settings.red.key || "";
     document.querySelector("#red-style").value = settings.red.style;
     document.querySelector("#black-name").value = settings.black.name;
     document.querySelector("#black-model").value = settings.black.model;
+    document.querySelector("#black-key").value = settings.black.key || "";
     document.querySelector("#black-style").value = settings.black.style;
   }
 
@@ -354,11 +356,13 @@ export function createUI(callbacks) {
       red: {
         name: document.querySelector("#red-name").value.trim() || "红方",
         model: document.querySelector("#red-model").value.trim(),
+        key: document.querySelector("#red-key").value.trim(),
         style: document.querySelector("#red-style").value.trim(),
       },
       black: {
         name: document.querySelector("#black-name").value.trim() || "黑方",
         model: document.querySelector("#black-model").value.trim(),
+        key: document.querySelector("#black-key").value.trim(),
         style: document.querySelector("#black-style").value.trim(),
       },
     };
