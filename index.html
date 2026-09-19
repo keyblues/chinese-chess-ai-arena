@@ -13,7 +13,7 @@
         <div class="seal" aria-hidden="true">弈</div>
         <div class="title-block">
           <h1>观弈</h1>
-          <p>模型对弈 · 工具行棋 · 本地裁判</p>
+          <p>模型对弈 · 本地裁判</p>
         </div>
       </div>
       <div class="top-actions">
@@ -24,67 +24,60 @@
 
     <main class="workbench">
       <div class="arena">
-        <!-- 记分牌：黑方名牌 · 局面 · 红方名牌 -->
-        <section class="scoreboard">
+        <!-- 双方名牌 -->
+        <section class="plates">
           <div class="plate b" id="seat-b">
-            <div class="badge badge-b" aria-hidden="true">黑</div>
+            <span class="badge badge-b" aria-hidden="true">黑</span>
             <div class="plate-main">
               <h2 id="name-b">黑方</h2>
               <p class="model" id="model-b"></p>
-              <p class="phase" id="phase-b">待开局</p>
             </div>
+            <span class="phase" id="phase-b">待开局</span>
             <div class="clock" id="clock-b">60:00</div>
           </div>
-          <div class="board-center">
-            <div class="status" id="status">待开局</div>
-            <div class="banner" id="banner" hidden></div>
-          </div>
           <div class="plate r" id="seat-r">
-            <div class="badge badge-r" aria-hidden="true">红</div>
+            <span class="badge badge-r" aria-hidden="true">红</span>
             <div class="plate-main">
               <h2 id="name-r">红方</h2>
               <p class="model" id="model-r"></p>
-              <p class="phase" id="phase-r">待开局</p>
             </div>
+            <span class="phase" id="phase-r">待开局</span>
             <div class="clock" id="clock-r">60:00</div>
           </div>
         </section>
 
-        <!-- 棋盘 -->
+        <!-- 棋盘（结果印章直接盖在盘面上） -->
         <section class="board-frame">
           <div class="board-fit" id="board-fit">
             <div class="board" id="board"></div>
+            <div class="banner" id="banner" hidden></div>
           </div>
         </section>
 
-        <!-- 工具杆 + 棋谱绸带 -->
-        <section class="ledger-bar">
-          <div class="toolbar">
-            <div class="tb-group">
-              <button class="solid-btn" id="btn-start" type="button">开局</button>
-              <button class="ghost-btn" id="btn-pause" type="button">暂停</button>
-              <button class="ghost-btn" id="btn-stop" type="button">停局</button>
-            </div>
-            <div class="tb-group" id="review-bar" hidden>
+        <!-- 控制与棋谱绸带（合为一条） -->
+        <section class="strip">
+          <div class="controls">
+            <button class="solid-btn" id="btn-start" type="button">开局</button>
+            <button class="ghost-btn" id="btn-pause" type="button">暂停</button>
+            <button class="ghost-btn" id="btn-stop" type="button">停局</button>
+            <span class="review" id="review-bar" hidden>
+              <span class="vsep" aria-hidden="true"></span>
               <button class="ghost-btn" id="btn-prev" type="button">上一手</button>
               <button class="ghost-btn" id="btn-next" type="button">下一手</button>
               <button class="ghost-btn" id="btn-exit-review" type="button">退出回看</button>
-            </div>
-            <div class="tb-group tb-end">
-              <button class="ghost-btn" id="btn-copy" type="button">复制棋谱</button>
-            </div>
+            </span>
+            <button class="ghost-btn tb-end" id="btn-copy" type="button">复制棋谱</button>
           </div>
           <ol class="ribbon" id="movelist"></ol>
-          <p class="detail" id="detail"></p>
         </section>
       </div>
 
-      <!-- 行棋日志侧栏（VSCode 式） -->
+      <!-- 行棋日志坞 -->
       <aside class="dock" id="dock">
         <header class="dock-head">
           <span class="dock-dot" aria-hidden="true"></span>
           <h3>行棋日志</h3>
-          <span class="dock-sub">思维链 · 输出 · 工具调用</span>
+          <span class="dock-sub" id="dock-round"></span>
         </header>
         <div class="dock-body" id="dock-log"></div>
       </aside>

@@ -113,16 +113,6 @@ function escapeText(value) {
     .replace(/>/g, "&gt;");
 }
 
-function statusText(snap) {
-  if (snap.review) return snap.review.label;
-  if (!snap || snap.status === "idle") return "待开局";
-  if (snap.status === "paused" || snap.paused) return `已暂停 · 轮到${snap.active === "b" ? "黑方" : "红方"}`;
-  if (snap.status === "finished") return resultText(snap.result);
-  const round = Math.floor((snap.moves?.length || 0) / 2) + 1;
-  const who = snap.active === "b" ? "黑方" : "红方";
-  return `第 ${round} 回合 · ${who} · ${snap.phase?.[snap.active] || "思考"}`;
-}
-
 export function createUI(callbacks) {
   const board = document.querySelector("#board");
   const fit = document.querySelector("#board-fit");
@@ -247,7 +237,6 @@ export function createUI(callbacks) {
       list.append(li);
     }
     const shown = moves[Math.max(0, focus - 1)];
-    document.querySelector("#detail").textContent = shown?.thought ? `${shown.notation} · ${shown.thought}` : "";
     // 只在绸带内横向滚动，避免把整页竖直拽动
     const focused = list.querySelector(".on");
     if (focused) {
@@ -348,6 +337,7 @@ export function createUI(callbacks) {
     const nearBottom = dockBody.scrollTop + dockBody.clientHeight >= dockBody.scrollHeight - 80;
     let added = false;
     const round = Math.floor((snap.moves?.length || 0) / 2) + 1;
+    document.querySelector("#dock-round").textContent = snap.moves?.length ? `第 ${round} 回合` : "";
     ["b", "r"].forEach((side) => {
       (snap.traces?.[side] || []).forEach((item, idx) => {
         const key = `${side}:${snap.moves?.length || 0}:${item.id || idx}`;
@@ -383,7 +373,6 @@ export function createUI(callbacks) {
 
   function update(snap) {
     state.snap = snap;
-    document.querySelector("#status").textContent = statusText(snap);
     ["r", "b"].forEach((side) => {
       const seat = document.querySelector(`#seat-${side}`);
       seat.classList.toggle("active", snap.active === side);
