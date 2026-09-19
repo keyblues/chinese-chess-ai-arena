@@ -341,6 +341,30 @@ export class Match {
         } else if (outcome.kind === "resign") {
           this.finish({ winner: opposite(this.pos.side), reason: "认输", detail: outcome.thought });
           return;
+        } else if (outcome.kind === "random") {
+          // 模型行为失当不终结比赛：裁判从合法着法中随机代走一步
+          const legal = legalMoves(this.pos);
+          if (!legal.length) {
+            const terminal = terminalStatus(this.pos);
+            this.finish(terminal || { winner: opposite(this.pos.side), reason: "无合法着法" });
+            return;
+          }
+          const move = legal[Math.floor(Math.random() * legal.length)];
+          this.applyCommitted({ move, iccs: move.iccs, thought: `裁判代走（${outcome.reason || "模型未落子"}）` });
+          const repeated = repetition(this.records, this.positions);
+          if (repeated) {
+            this.finish(repeated);
+            return;
+          }
+          if (this.pos.halfmove >= DRAW_PLIES) {
+            this.finish({ winner: "draw", reason: "120步无吃子" });
+            return;
+          }
+          const after = terminalStatus(this.pos);
+          if (after) {
+            this.finish(after);
+            return;
+          }
         } else if (outcome.kind === "forfeit") {
           this.finish({ winner: opposite(this.pos.side), reason: "违规", detail: outcome.reason });
           return;
@@ -430,29 +454,40 @@ export class Match {
         id: call.id || `call_${step}_${index}`,
       }));
       if (!calls.length) {
-        failures += 1;
-        messages.push({ role: "assistant", content: acc.content || "（没有调用工具）" });
         const truncated = acc.finishReason === "length";
-        this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · ${truncated ? "输出超长被截断" : "未调用工具"}`;
+        messages.push({ role: "assistant", content: acc.content || "（没有调用工具）" });
         trace.push({
           id: `nudge-${step}`,
           kind: "tool",
           title: "裁判",
           body: "",
           result: truncated
-            ? "你的分析过长，输出被截断，未能落子。不要再写长分析，直接调用 commit_move 提交一步。"
+            ? "分析过长被截断未落子。直接调用 commit_move 提交一步。"
             : "没有工具调用。请调用 legal_moves，再调用 commit_move。",
           pending: false,
           ok: false,
         });
-        this.emit();
-        if (failures >= MAX_FAILURES) return { kind: "forfeit", reason: truncated ? "多次输出超长未落子" : "连续未调用工具" };
+        if (truncated) {
+          // 截断是模型能力限制，不计违规次数，直接催促重试
+          this.phase[side] = "重试 · 输出超长被截断";
+          messages.push({
+            role: "user",
+            content: "你上一轮分析过长被截断未落子。不要再写长分析，直接调用 commit_move 提交一步合法着法。",
+          });
+          this.emit();
+          continue;
+        }
+        failures += 1;
+        this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · 未调用工具`;
+        if (failures >= MAX_FAILURES) {
+          this.emit();
+          return { kind: "random", reason: "连续未调用工具，裁判代走" };
+        }
         messages.push({
           role: "user",
-          content: truncated
-            ? "你上一轮的分析过长，输出在中途被截断，没有产生任何着法。不要再长篇推演，直接调用 commit_move 提交一步合法着法。"
-            : "你没有调用工具。请先调用 legal_moves，再调用 commit_move 或 resign。不要只用文字给出着法。",
+          content: "你没有调用工具。请先调用 legal_moves，再调用 commit_move 或 resign。不要只用文字给出着法。",
         });
+        this.emit();
         continue;
       }
 
@@ -492,14 +527,14 @@ export class Match {
           finished = executed.outcome;
           break;
         }
-        if (failures >= MAX_FAILURES) return { kind: "forfeit", reason: executed.reason || "多次非法着法" };
+        if (failures >= MAX_FAILURES) return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
       }
       if (finished) return finished;
       if (step >= 3) {
         messages.push({ role: "user", content: "信息已经足够。请立刻调用 commit_move 或 resign，不要再重复查询。" });
       }
     }
-    return { kind: "forfeit", reason: "工具调用次数用尽仍未落子" };
+    return { kind: "random", reason: "多轮未落子，裁判代走" };
   }
 
   executeTool(call, legalMap) {
