@@ -19,7 +19,7 @@ const MAX_STEPS = 8;
 const MAX_FAILURES = 3;
 const DRAW_PLIES = 120;
 
-function systemPrompt(side, style) {
+function systemPrompt(side) {
   const name = sideName(side);
   return [
     `你是中国象棋智能体，本局执${name}。裁判在本地，你不能用文字宣称已经走子。`,
@@ -29,7 +29,6 @@ function systemPrompt(side, style) {
     "3. 调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。",
     "move 必须与 legal_moves 返回的坐标完全一致。非法着法会被工具拒绝，然后你再选。",
     "胜负由裁判裁定：将死、困毙、认输、违规、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
-    `行棋风格：${style || "按局面正常行棋。"}`,
   ].join("\n");
 }
 
@@ -107,18 +106,29 @@ function replay(moves) {
   return { pos, positions, records };
 }
 
+function shapePlayer(raw, fallback) {
+  const source = raw || {};
+  const base = source.providerId ? source : fallback;
+  return {
+    name: source.name || fallback.name,
+    providerId: source.providerId || fallback.providerId,
+    model: source.model || fallback.model,
+    contextTokens: Number(source.contextTokens) > 0 ? Number(source.contextTokens) : fallback.contextTokens,
+    maxOutputTokens: Number(source.maxOutputTokens) > 0 ? Number(source.maxOutputTokens) : fallback.maxOutputTokens,
+  };
+}
+
 export class Match {
   constructor({ settings, hooks, saved }) {
     this.hooks = hooks;
     this.id = saved?.id || `m_${Date.now()}`;
     this.startedAt = saved?.startedAt || Date.now();
     this.temperature = saved?.temperature ?? settings.temperature;
-    this.baseUrl = saved?.baseUrl || settings.baseUrl;
+    this.providers = settings.providers || [];
     this.incrementMs = saved?.incrementMs ?? settings.incrementSeconds * 1000;
-    this.players = saved?.players || {
-      r: { ...settings.red },
-      b: { ...settings.black },
-    };
+    this.players = saved?.players
+      ? { r: shapePlayer(saved.players.r, settings.red), b: shapePlayer(saved.players.b, settings.black) }
+      : { r: shapePlayer(settings.red, settings.red), b: shapePlayer(settings.black, settings.black) };
     const restored = replay(saved?.moves || []);
     this.pos = restored.pos;
     this.positions = restored.positions;
@@ -141,9 +151,9 @@ export class Match {
     this.timer = 0;
   }
 
-  apiKey(side) {
-    const player = this.players[side] || {};
-    return player.key || this.hooks.getSettings().apiKey;
+  providerOf(side) {
+    const id = this.players[side]?.providerId;
+    return this.providers.find((provider) => provider.id === id) || this.providers[0] || { baseUrl: "", apiKey: "" };
   }
 
   snapshot() {
@@ -209,7 +219,6 @@ export class Match {
     return {
       id: this.id,
       startedAt: this.startedAt,
-      baseUrl: this.baseUrl,
       temperature: this.temperature,
       incrementMs: this.incrementMs,
       mainMinutes: this.mainMinutes,
@@ -354,7 +363,7 @@ export class Match {
     this.emit();
 
     const messages = [
-      { role: "system", content: systemPrompt(side, player.style) },
+      { role: "system", content: systemPrompt(side) },
       { role: "user", content: turnPrompt(this.pos, this.records) },
     ];
     let failures = 0;
@@ -373,12 +382,13 @@ export class Match {
         this.phase[side] = failures ? `重试 ${failures}/${MAX_FAILURES}` : "思考中";
         this.emit();
         acc = await streamChat({
-          baseUrl: this.baseUrl,
-          apiKey: this.apiKey(side),
+          baseUrl: this.providerOf(side).baseUrl,
+          apiKey: this.providerOf(side).apiKey,
           model: player.model,
-          messages,
+          messages: trimMessages(messages, player.contextTokens),
           tools: TOOLS,
           temperature: this.temperature,
+          maxTokens: player.maxOutputTokens,
           signal: this.controller.signal,
           onDelta: (delta) => {
             if (delta.reasoning) {
@@ -595,8 +605,36 @@ export class Match {
   }
 }
 
-function previewMove(call, legalMap) {
-  if (call.name && call.name !== "commit_move") return null;
+function estimateTokens(value) {
+  return Math.ceil(String(value ?? "").length / 2);
+}
+
+function messagesTokens(messages) {
+  return messages.reduce(
+    (sum, message) =>
+      sum +
+      estimateTokens(message.content) +
+      estimateTokens(message.reasoning_content) +
+      estimateTokens(message.tool_calls ? JSON.stringify(message.tool_calls) : ""),
+    0,
+  );
+}
+
+// 轮内对话逼近模型上下文时，先丢推理原文，再从最旧的一组（assistant + 其 tool 结果）开始丢。
+function trimMessages(messages, contextTokens) {
+  let list = messages.map((message) =>
+    message.role === "assistant" && message.reasoning_content ? { ...message, reasoning_content: undefined } : message,
+  );
+  const budget = Math.max(4096, Math.floor((Number(contextTokens) || 128000) * 0.7));
+  while (list.length > 2 && messagesTokens(list) > budget) {
+    let end = 3;
+    while (end < list.length && list[end].role === "tool") end += 1;
+    list = [list[0], list[1], ...list.slice(end)];
+  }
+  return list;
+}
+
+function previewMove(call, legalMap) {  if (call.name && call.name !== "commit_move") return null;
   const found = String(call.arguments || "").toLowerCase().match(/[a-i][0-9][a-i][0-9]/);
   if (!found || !legalMap.has(found[0])) return null;
   const move = legalMap.get(found[0]);

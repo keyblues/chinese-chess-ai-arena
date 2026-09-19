@@ -155,16 +155,22 @@ function paint() {
   else ui.update(idleSnapshot());
 }
 
+function providerFor(side) {
+  return settings.providers.find((provider) => provider.id === side.providerId) || settings.providers[0] || null;
+}
+
 function startMatch() {
   settings = ui.readSettings();
   saveSettings(settings);
-  if ((!settings.apiKey && !settings.red.key) || (!settings.apiKey && !settings.black.key)) {
-    ui.toast("先填写 API Key：全局一个，或红黑各自一个");
+  const redProvider = providerFor(settings.red);
+  const blackProvider = providerFor(settings.black);
+  if (!redProvider?.baseUrl || !redProvider.apiKey || !blackProvider?.baseUrl || !blackProvider.apiKey) {
+    ui.toast("双方所选供应商都要填接口地址和 API Key");
     ui.openSettings();
     return;
   }
-  if (!settings.baseUrl || !settings.red.model || !settings.black.model) {
-    ui.toast("接口地址和双方模型都不能空");
+  if (!settings.red.model || !settings.black.model) {
+    ui.toast("双方模型都不能为空");
     ui.openSettings();
     return;
   }
@@ -183,14 +189,14 @@ function togglePause() {
 
 async function testApi() {
   const draft = ui.readSettings();
-  const anyKey = draft.apiKey || draft.red.key || draft.black.key;
-  if (!anyKey || !draft.baseUrl) {
-    ui.setTestResult("先填写接口地址和 API Key", false);
+  const provider = draft.providers.find((item) => item.id === draft.red.providerId) || draft.providers[0];
+  if (!provider?.baseUrl || !provider.apiKey) {
+    ui.setTestResult("红方所选供应商需要接口地址和 API Key", false);
     return;
   }
   ui.setTestResult("正在连接…");
   try {
-    const result = await testConnection({ ...draft, apiKey: anyKey, model: draft.red.model });
+    const result = await testConnection({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: draft.red.model });
     if (result.models?.length) ui.setModels(result.models);
     ui.setTestResult(result.message, true);
   } catch (error) {

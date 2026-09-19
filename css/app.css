@@ -256,7 +256,7 @@ dialog::backdrop { background: rgba(8, 5, 3, 0.72); }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
 label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
 label.wide { grid-column: 1 / -1; }
-input, textarea {
+input, textarea, select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -264,6 +264,16 @@ input, textarea {
   padding: 8px 10px;
 }
 textarea { min-height: 68px; resize: vertical; }
+.section-title { margin: 14px 0 8px; font-family: var(--kai); font-size: 22px; font-weight: 500; }
+.provider-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(150px, 1.6fr) minmax(130px, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+#btn-add-provider { margin: 2px 0 4px; }
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
 .side-box { border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
 .side-box h4 { margin: 0 0 8px; font-family: var(--kai); font-size: 22px; font-weight: 500; }

@@ -113,10 +113,11 @@ function parsePayload(data) {
   return json;
 }
 
-async function readStream(response, onDelta) {
+async function readStream(response, onDelta, touch) {
   const acc = { content: "", reasoning: "", toolCalls: [] };
   const reader = response.body?.getReader();
   if (!reader) {
+    touch?.();
     const json = await response.json();
     if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
     const message = json.choices?.[0]?.message || {};
@@ -136,6 +137,7 @@ async function readStream(response, onDelta) {
   let buffer = "";
   while (true) {
     const { done, value } = await reader.read();
+    touch?.();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r?\n/);
@@ -224,72 +226,132 @@ export function normalizeCalls(acc) {
   return textToolCalls(`${acc.reasoning || ""}\n${acc.content || ""}`);
 }
 
-function isTransientChatError(error) {
-  if (error?.name === "AbortError") return false;
+function isTransientMessage(text) {
   return /HTTP (408|429|500|502|503|504)|overloaded|temporar|rate.?limit|too many requests/i.test(
-    String(error?.message || ""),
+    String(text || ""),
   );
 }
 
+class TransientError extends Error {}
+
+const STALL_TIMEOUT_MS = 120000;
+const MAX_ATTEMPTS = 4;
+const RETRY_BUDGET_MS = 480000;
+
+function abortError() {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+// 单次请求 = 看门狗保护下的完整对话。任何空闲超时、瞬时 HTTP 状态、上游过载
+// 都转成 TransientError，由 streamChat 的重试预算统一兜底；用户主动中止立即上抛。
+async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
+  const watchdog = new AbortController();
+  let reason = null;
+  let stallTimer = 0;
+  const touch = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      reason = "stall";
+      watchdog.abort();
+    }, STALL_TIMEOUT_MS);
+  };
+  const onOuterAbort = () => {
+    reason = "outer";
+    watchdog.abort();
+  };
+  if (signal?.aborted) throw abortError();
+  signal?.addEventListener("abort", onOuterAbort, { once: true });
+  touch();
+  try {
+    let response;
+    try {
+      response = await fetchWithRetry(
+        `${rootUrl(baseUrl)}/chat/completions`,
+        {
+          method: "POST",
+          signal: watchdog.signal,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            tools,
+            temperature,
+            max_tokens: maxTokens ?? 38000,
+            stream: true,
+          }),
+        },
+        3,
+      );
+    } catch (error) {
+      if (reason === "stall") throw new TransientError(`连接 ${STALL_TIMEOUT_MS / 1000} 秒无响应`);
+      if (error instanceof TypeError) throw formatFetchError(error);
+      throw error;
+    }
+    touch();
+    if (!response.ok) {
+      const text = await response.text();
+      const message = `HTTP ${response.status}：${text.slice(0, 360)}`;
+      if (RETRY_STATUS.has(response.status)) throw new TransientError(message);
+      throw new Error(message);
+    }
+    const type = response.headers.get("content-type") || "";
+    if (type.includes("application/json")) {
+      const json = await response.json();
+      if (json.error) {
+        const message = json.error.message || JSON.stringify(json.error);
+        if (isTransientMessage(message)) throw new TransientError(message);
+        throw new Error(message);
+      }
+      const message = json.choices?.[0]?.message || {};
+      const acc = {
+        content: message.content || "",
+        reasoning: message.reasoning_content || message.reasoning || "",
+        toolCalls: (message.tool_calls || []).map((call, index) => ({
+          index,
+          id: call.id || "",
+          name: call.function?.name || "",
+          arguments: call.function?.arguments || "",
+        })),
+      };
+      onDelta?.(snapshot(acc));
+      return acc;
+    }
+    return await readStream(response, onDelta, touch);
+  } catch (error) {
+    if (reason === "stall") {
+      throw new TransientError(`流式响应 ${STALL_TIMEOUT_MS / 1000} 秒没有收到数据，已掐断重试`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    signal?.removeEventListener("abort", onOuterAbort);
+  }
+}
+
 export async function streamChat(options) {
-  let last;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  const started = Date.now();
+  let attempt = 0;
+  for (;;) {
     try {
       return await streamChatOnce(options);
     } catch (error) {
-      if (!isTransientChatError(error)) throw error;
-      last = error;
-      await wait(Math.min(1500 * 2 ** attempt, 12000));
+      if (error?.name === "AbortError") throw error;
+      const transient = error instanceof TransientError || isTransientMessage(error?.message);
+      if (!transient) throw error;
+      attempt += 1;
+      if (attempt >= MAX_ATTEMPTS || Date.now() - started > RETRY_BUDGET_MS) {
+        throw error instanceof TransientError
+          ? new Error(`上游持续不可用，已重试 ${attempt} 次：${error.message}`)
+          : error;
+      }
+      await wait(Math.min(1500 * 2 ** attempt, 15000));
     }
   }
-  throw last;
-}
-
-async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
-  let response;
-  try {
-    response = await fetchWithRetry(`${rootUrl(baseUrl)}/chat/completions`, {
-      method: "POST",
-      signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        tools,
-        temperature,
-        max_tokens: maxTokens ?? 16384,
-        stream: true,
-      }),
-    });
-  } catch (error) {
-    throw formatFetchError(error);
-  }
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}：${text.slice(0, 360)}`);
-  }
-  const type = response.headers.get("content-type") || "";
-  if (type.includes("application/json")) {
-    const json = await response.json();
-    if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
-    const message = json.choices?.[0]?.message || {};
-    const acc = {
-      content: message.content || "",
-      reasoning: message.reasoning_content || message.reasoning || "",
-      toolCalls: (message.tool_calls || []).map((call, index) => ({
-        index,
-        id: call.id || "",
-        name: call.function?.name || "",
-        arguments: call.function?.arguments || "",
-      })),
-    };
-    onDelta?.(snapshot(acc));
-    return acc;
-  }
-  return readStream(response, onDelta);
 }
 
 export async function testConnection({ baseUrl, apiKey, model, signal }) {

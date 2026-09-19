@@ -326,45 +326,93 @@ export function createUI(callbacks) {
     document.querySelector("#btn-next").disabled = !snap.review || snap.review.ply >= snap.review.total;
   }
 
+  function providerRow(provider) {
+    const row = document.createElement("div");
+    row.className = "provider-row";
+    row.dataset.id = provider.id || "";
+    row.innerHTML = `
+      <input class="pr-name" placeholder="名称" />
+      <input class="pr-url" placeholder="接口地址，如 https://openrouter.ai/api/v1" />
+      <input class="pr-key" type="password" placeholder="API Key" autocomplete="off" />
+      <button class="ghost-btn pr-del" type="button" title="删除该供应商">删</button>`;
+    row.querySelector(".pr-name").value = provider.name || "";
+    row.querySelector(".pr-url").value = provider.baseUrl || "";
+    row.querySelector(".pr-key").value = provider.apiKey || "";
+    row.querySelector(".pr-del").addEventListener("click", () => {
+      if (document.querySelectorAll(".provider-row").length <= 1) {
+        toast("至少保留一个供应商");
+        return;
+      }
+      row.remove();
+      refreshProviderOptions();
+    });
+    return row;
+  }
+
+  function collectProviders() {
+    return [...document.querySelectorAll(".provider-row")]
+      .map((row) => ({
+        id: row.dataset.id || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        name: row.querySelector(".pr-name").value.trim(),
+        baseUrl: row.querySelector(".pr-url").value.trim(),
+        apiKey: row.querySelector(".pr-key").value.trim(),
+      }))
+      .filter((provider) => provider.baseUrl || provider.apiKey || provider.name);
+  }
+
+  function refreshProviderOptions() {
+    const providers = collectProviders();
+    ["red", "black"].forEach((side) => {
+      const select = document.querySelector(`#${side}-provider`);
+      const current = select.value;
+      select.innerHTML = providers
+        .map((provider, index) => `<option value="${escapeText(provider.id)}">${escapeText(provider.name || `供应商 ${index + 1}`)}</option>`)
+        .join("");
+      if (providers.some((provider) => provider.id === current)) select.value = current;
+    });
+  }
+
+  function renderProviders(providers) {
+    const root = document.querySelector("#provider-rows");
+    root.innerHTML = "";
+    (providers.length ? providers : [{}]).forEach((provider) => root.append(providerRow(provider)));
+    refreshProviderOptions();
+  }
+
   function fillSettings(settings) {
-    document.querySelector("#base-url").value = settings.baseUrl;
-    document.querySelector("#api-key").value = settings.apiKey;
     document.querySelector("#temperature").value = settings.temperature;
     document.querySelector("#main-minutes").value = settings.mainMinutes;
     document.querySelector("#increment").value = settings.incrementSeconds;
-    document.querySelector("#red-name").value = settings.red.name;
-    document.querySelector("#red-model").value = settings.red.model;
-    document.querySelector("#red-key").value = settings.red.key || "";
-    document.querySelector("#red-style").value = settings.red.style;
-    document.querySelector("#black-name").value = settings.black.name;
-    document.querySelector("#black-model").value = settings.black.model;
-    document.querySelector("#black-key").value = settings.black.key || "";
-    document.querySelector("#black-style").value = settings.black.style;
+    renderProviders(settings.providers || []);
+    ["red", "black"].forEach((side) => {
+      const player = settings[side] || {};
+      document.querySelector(`#${side}-name`).value = player.name || "";
+      document.querySelector(`#${side}-provider`).value = player.providerId || "";
+      document.querySelector(`#${side}-model`).value = player.model || "";
+      document.querySelector(`#${side}-context`).value = player.contextTokens ?? 128000;
+      document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? 38000;
+    });
   }
 
   function readSettings() {
-    const number = (id, fallback) => {
+    const number = (id, fallback, min = 0) => {
       const value = Number(document.querySelector(id).value);
-      return Number.isFinite(value) ? value : fallback;
+      return Number.isFinite(value) && value >= min ? value : fallback;
     };
+    const side = (prefix, fallbackName) => ({
+      name: document.querySelector(`#${prefix}-name`).value.trim() || fallbackName,
+      providerId: document.querySelector(`#${prefix}-provider`).value,
+      model: document.querySelector(`#${prefix}-model`).value.trim(),
+      contextTokens: number(`#${prefix}-context`, 128000, 1024),
+      maxOutputTokens: number(`#${prefix}-maxout`, 38000, 256),
+    });
     return {
-      baseUrl: document.querySelector("#base-url").value.trim(),
-      apiKey: document.querySelector("#api-key").value.trim(),
+      providers: collectProviders(),
       temperature: number("#temperature", 0.4),
-      mainMinutes: number("#main-minutes", 5),
-      incrementSeconds: number("#increment", 15),
-      red: {
-        name: document.querySelector("#red-name").value.trim() || "红方",
-        model: document.querySelector("#red-model").value.trim(),
-        key: document.querySelector("#red-key").value.trim(),
-        style: document.querySelector("#red-style").value.trim(),
-      },
-      black: {
-        name: document.querySelector("#black-name").value.trim() || "黑方",
-        model: document.querySelector("#black-model").value.trim(),
-        key: document.querySelector("#black-key").value.trim(),
-        style: document.querySelector("#black-style").value.trim(),
-      },
+      mainMinutes: number("#main-minutes", 60, 1),
+      incrementSeconds: number("#increment", 60),
+      red: side("red", "红方"),
+      black: side("black", "黑方"),
     };
   }
 
@@ -414,6 +462,10 @@ export function createUI(callbacks) {
   document.querySelector("#btn-stop").addEventListener("click", () => callbacks.onStop?.());
   document.querySelector("#btn-settings").addEventListener("click", () => document.querySelector("#settings").showModal());
   document.querySelector("#btn-close-settings").addEventListener("click", () => document.querySelector("#settings").close());
+  document.querySelector("#btn-add-provider").addEventListener("click", () => {
+    document.querySelector("#provider-rows").append(providerRow({}));
+    refreshProviderOptions();
+  });
   document.querySelector("#btn-history").addEventListener("click", () => document.querySelector("#history").showModal());
   document.querySelector("#btn-close-history").addEventListener("click", () => document.querySelector("#history").close());
   document.querySelector("#settings-form").addEventListener("submit", (event) => {
