@@ -408,13 +408,37 @@ export function createUI(callbacks) {
     drawMarks(snap);
     renderMoves(snap);
     const banner = document.querySelector("#banner");
-    if (snap.status === "finished" && snap.result) {
+    const result = snap.result;
+    // 印章只盖真实胜负（含和棋）；中断/中止这类供应商或人为中断走日志与提示
+    const realResult = snap.status === "finished" && result && ["r", "b", "draw"].includes(result.winner);
+    if (realResult) {
       banner.hidden = false;
-      banner.textContent = snap.result.detail ? `${resultText(snap.result)}。${snap.result.detail}` : resultText(snap.result);
+      banner.textContent = result.detail ? `${resultText(result)}。${result.detail}` : resultText(result);
     } else if (snap.review) {
       banner.hidden = false;
       banner.textContent = snap.review.label;
-    } else banner.hidden = true;
+    } else {
+      banner.hidden = true;
+      if (snap.status === "finished" && result) {
+        const key = `sys:${snap.moves?.length || 0}:${result.reason}`;
+        if (!dockState.map.has(key)) {
+          dockPush(
+            key,
+            snap.active || "r",
+            {
+              kind: "tool",
+              title: "裁判",
+              body: "",
+              result: result.detail ? `${result.reason} · ${result.detail}` : result.reason,
+              ok: false,
+              pending: false,
+            },
+            Math.floor((snap.moves?.length || 0) / 2) + 1,
+          );
+          toast(result.detail ? `${result.reason}：${result.detail}` : result.reason);
+        }
+      }
+    }
     const live = snap.status === "playing" || snap.status === "paused" || snap.paused;
     document.querySelector("#btn-start").disabled = live;
     document.querySelector("#btn-pause").disabled = !live && snap.status !== "paused";
