@@ -122,11 +122,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 .solid-btn:disabled, .ghost-btn:disabled { opacity: 0.42; cursor: not-allowed; }
 
-/* ---------- 舞台（左主区 + 右日志坞，VSCode 式） ---------- */
+/* ---------- 舞台（左主区 + 右日志坞，VSCode 式） ----------
+   桌面端：整个应用锁定视口，主区与日志坞各自独立滚动；
+   窄屏：退化为文档流，日志坞跟在主区下方。 */
 .workbench {
   flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 392px);
+  grid-template-columns: 1fr;
   gap: 18px;
   align-items: start;
   width: 100%;
@@ -141,6 +144,20 @@ button, input, textarea, select { font: inherit; color: inherit; }
   align-items: center;
   gap: 16px;
   min-width: 0;
+  min-height: 0;
+}
+
+@media (min-width: 1121px) {
+  .app { height: 100vh; }
+  .workbench {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 392px);
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+    overflow: hidden;
+    padding-bottom: 18px;
+  }
+  .arena { overflow-y: auto; }
+  .dock { max-height: none; }
 }
 
 /* ---------- 记分牌 ---------- */
@@ -460,11 +477,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 /* ---------- 行棋日志坞（VSCode 式侧栏） ---------- */
 .dock {
-  position: sticky;
-  top: 12px;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 28px);
+  height: auto;
+  max-height: 480px;
   border: 1px solid #46372a;
   border-radius: 13px;
   background: linear-gradient(180deg, #2b2117, #241c14);
@@ -705,16 +721,6 @@ textarea { min-height: 68px; resize: vertical; }
 }
 
 /* ---------- 响应式 ---------- */
-@media (max-width: 1120px) {
-  .workbench { grid-template-columns: 1fr; }
-  .dock {
-    position: static;
-    height: auto;
-    order: 2;
-  }
-  .dock-body { max-height: 360px; }
-}
-
 @media (max-width: 880px) {
   .scoreboard {
     grid-template-columns: 1fr;
