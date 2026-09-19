@@ -23,11 +23,9 @@ function systemPrompt(side) {
   const name = sideName(side);
   return [
     `你是中国象棋智能体，本局执${name}。裁判在本地，你不能用文字宣称已经走子。`,
-    "你只能通过工具行动：",
-    "1. 调用 legal_moves 查看全部合法着法。需要棋盘时调用 look_board。",
-    "2. 比较候选着法。",
-    "3. 调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。",
-    "move 必须与 legal_moves 返回的坐标完全一致。非法着法会被工具拒绝，然后你再选。",
+    "每步消息都会附上全部合法着法：比较后直接调用 commit_move 提交其中一步，move 必须逐字来自该列表。",
+    "需要复核盘面时才调用 look_board 或 legal_moves，不要重复查询。",
+    "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选。",
     "胜负由裁判裁定：将死、困毙、认输、违规、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
   ].join("\n");
 }
@@ -365,9 +363,13 @@ export class Match {
     if (!this.turnStarted) this.turnStarted = Date.now();
     this.emit();
 
+    const legalLines = legal.map((move) => `${move.iccs} ${toNotation(this.pos, move)}`).join("\n");
     const messages = [
       { role: "system", content: systemPrompt(side) },
-      { role: "user", content: turnPrompt(this.pos, this.records) },
+      {
+        role: "user",
+        content: `${turnPrompt(this.pos, this.records)}\n\n全部合法着法（ICCS + 中文记谱），从中选择一步提交：\n${legalLines}`,
+      },
     ];
     let failures = 0;
 

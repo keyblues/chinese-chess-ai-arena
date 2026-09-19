@@ -113,11 +113,11 @@ function parsePayload(data) {
   return json;
 }
 
-async function readStream(response, onDelta, touch) {
+async function readStream(response, onDelta, markData) {
   const acc = { content: "", reasoning: "", toolCalls: [] };
   const reader = response.body?.getReader();
   if (!reader) {
-    touch?.();
+    markData?.();
     const json = await response.json();
     if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
     const message = json.choices?.[0]?.message || {};
@@ -137,12 +137,15 @@ async function readStream(response, onDelta, touch) {
   let buffer = "";
   while (true) {
     const { done, value } = await reader.read();
-    touch?.();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
+    const text = decoder.decode(value, { stream: true });
+    const lines = (buffer + text).split(/\r?\n/);
     buffer = lines.pop() || "";
-    for (const line of lines) consumeLine(line, acc, onDelta);
+    for (const line of lines) {
+      // 只有 data 行才算“有效数据”：注释行与空行（keep-alive）不喂看门狗
+      if (line.trimStart().startsWith("data:")) markData?.();
+      consumeLine(line, acc, onDelta);
+    }
   }
   if (buffer.trim()) consumeLine(buffer, acc, onDelta);
   return acc;
@@ -234,9 +237,15 @@ function isTransientMessage(text) {
 
 class TransientError extends Error {}
 
-const STALL_TIMEOUT_MS = 120000;
+const STALL_TIMEOUT_MS = 100000;
+const ATTEMPT_BUDGET_MS = 360000;
 const MAX_ATTEMPTS = 4;
-const RETRY_BUDGET_MS = 480000;
+const RETRY_BUDGET_MS = 900000;
+
+// 每日额度/余额类错误重试没有意义，直接判定为致命
+function isFatalQuotaError(text) {
+  return /per-day|daily limit|free-models-per-day|insufficient|add \d+ credits|balance/i.test(String(text || ""));
+}
 
 function abortError() {
   const error = new Error("Aborted");
@@ -244,26 +253,33 @@ function abortError() {
   return error;
 }
 
-// 单次请求 = 看门狗保护下的完整对话。任何空闲超时、瞬时 HTTP 状态、上游过载
-// 都转成 TransientError，由 streamChat 的重试预算统一兜底；用户主动中止立即上抛。
+// 单次请求 = 看门狗保护下的完整对话。看门狗只认“有意义的 data 行”：
+// 上游的注释行/keep-alive 空包不再喂饱计时器，假死 100 秒即掐断；
+// 单次尝试整体限时 6 分钟；瞬时错误由 streamChat 的重试预算统一兜底。
 async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
   const watchdog = new AbortController();
   let reason = null;
-  let stallTimer = 0;
-  const touch = () => {
-    clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {
+  let lastDataAt = Date.now();
+  const startedAt = Date.now();
+  const markData = () => {
+    lastDataAt = Date.now();
+  };
+  const stallTimer = setInterval(() => {
+    const idle = Date.now() - lastDataAt;
+    if (idle > STALL_TIMEOUT_MS) {
       reason = "stall";
       watchdog.abort();
-    }, STALL_TIMEOUT_MS);
-  };
+    } else if (Date.now() - startedAt > ATTEMPT_BUDGET_MS) {
+      reason = "budget";
+      watchdog.abort();
+    }
+  }, 3000);
   const onOuterAbort = () => {
     reason = "outer";
     watchdog.abort();
   };
   if (signal?.aborted) throw abortError();
   signal?.addEventListener("abort", onOuterAbort, { once: true });
-  touch();
   try {
     let response;
     try {
@@ -288,11 +304,11 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
         3,
       );
     } catch (error) {
-      if (reason === "stall") throw new TransientError(`连接 ${STALL_TIMEOUT_MS / 1000} 秒无响应`);
+      if (reason === "stall" || reason === "budget") throw new TransientError(`上游 ${reason === "stall" ? "100 秒无有效数据" : "单次请求超过 6 分钟"}，已掐断`);
       if (error instanceof TypeError) throw formatFetchError(error);
       throw error;
     }
-    touch();
+    markData();
     if (!response.ok) {
       const text = await response.text();
       const message = `HTTP ${response.status}：${text.slice(0, 360)}`;
@@ -321,14 +337,14 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
       onDelta?.(snapshot(acc));
       return acc;
     }
-    return await readStream(response, onDelta, touch);
+    return await readStream(response, onDelta, markData);
   } catch (error) {
-    if (reason === "stall") {
-      throw new TransientError(`流式响应 ${STALL_TIMEOUT_MS / 1000} 秒没有收到数据，已掐断重试`);
+    if (reason === "stall" || reason === "budget") {
+      throw new TransientError(reason === "stall" ? `流式响应 100 秒没有有效数据，已掐断重试` : `单次请求超过 6 分钟未完成，已掐断重试`);
     }
     throw error;
   } finally {
-    clearTimeout(stallTimer);
+    clearInterval(stallTimer);
     signal?.removeEventListener("abort", onOuterAbort);
   }
 }
@@ -341,6 +357,7 @@ export async function streamChat(options) {
       return await streamChatOnce(options);
     } catch (error) {
       if (error?.name === "AbortError") throw error;
+      if (isFatalQuotaError(error?.message)) throw error;
       const transient = error instanceof TransientError || isTransientMessage(error?.message);
       if (!transient) throw error;
       attempt += 1;
