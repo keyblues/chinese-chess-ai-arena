@@ -392,8 +392,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
   z-index: 5;
 }
 
-/* ---------- 控制与棋谱绸带（合为一条） ---------- */
+/* ---------- 控制与棋谱绸带（合为一条） ----------
+   flex: none —— 主列里唯一可伸缩的是棋盘区，底条永不被压瘪 */
 .strip {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -413,13 +415,16 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .tb-end { margin-left: auto; }
 
 .ribbon {
+  flex: none;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 6px;
   margin: 0;
   padding: 8px 6px;
+  min-height: 46px;
   list-style: none;
   overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--card);
