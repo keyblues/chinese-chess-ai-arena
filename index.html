@@ -3,17 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>观弈 · 模型对模型</title>
+  <title>观弈 · 模型对弈</title>
   <link rel="stylesheet" href="css/app.css" />
 </head>
 <body>
   <div class="app">
     <header class="top">
       <div class="brand">
-        <div class="seal">弈</div>
-        <div>
+        <div class="seal" aria-hidden="true">弈</div>
+        <div class="title-block">
           <h1>观弈</h1>
-          <p>模型对模型 · 工具调用 · 本地裁判</p>
+          <p>模型对弈 · 工具行棋 · 本地裁判</p>
         </div>
       </div>
       <div class="top-actions">
@@ -21,55 +21,74 @@
         <button class="ghost-btn" id="btn-settings" type="button">设置</button>
       </div>
     </header>
-    <div class="arena">
-      <aside class="seat r" id="seat-r">
-        <div class="seat-head">
-          <div>
-            <h2 id="name-r">红方</h2>
-            <p class="model" id="model-r"></p>
+
+    <main class="workbench">
+      <div class="arena">
+        <!-- 记分牌：黑方名牌 · 局面 · 红方名牌 -->
+        <section class="scoreboard">
+          <div class="plate b" id="seat-b">
+            <div class="badge badge-b" aria-hidden="true">黑</div>
+            <div class="plate-main">
+              <h2 id="name-b">黑方</h2>
+              <p class="model" id="model-b"></p>
+              <p class="phase" id="phase-b">待开局</p>
+            </div>
+            <div class="clock" id="clock-b">60:00</div>
           </div>
-          <div class="clock" id="clock-r">5:00</div>
-        </div>
-        <div class="phase" id="phase-r">待开局</div>
-        <div class="trace" id="trace-r"></div>
-      </aside>
-      <section class="stage">
-        <div id="status">待开局</div>
-        <div class="board-frame">
+          <div class="board-center">
+            <div class="status" id="status">待开局</div>
+            <div class="banner" id="banner" hidden></div>
+          </div>
+          <div class="plate r" id="seat-r">
+            <div class="badge badge-r" aria-hidden="true">红</div>
+            <div class="plate-main">
+              <h2 id="name-r">红方</h2>
+              <p class="model" id="model-r"></p>
+              <p class="phase" id="phase-r">待开局</p>
+            </div>
+            <div class="clock" id="clock-r">60:00</div>
+          </div>
+        </section>
+
+        <!-- 棋盘 -->
+        <section class="board-frame">
           <div class="board-fit" id="board-fit">
             <div class="board" id="board"></div>
           </div>
-        </div>
-        <div class="controls">
-          <button class="solid-btn" id="btn-start" type="button">开局</button>
-          <button class="ghost-btn" id="btn-pause" type="button">暂停</button>
-          <button class="ghost-btn" id="btn-stop" type="button">停止</button>
-        </div>
-        <div class="review-bar" id="review-bar" hidden>
-          <button class="ghost-btn" id="btn-prev" type="button">上一手</button>
-          <button class="ghost-btn" id="btn-next" type="button">下一手</button>
-          <button class="ghost-btn" id="btn-exit-review" type="button">退出回看</button>
-        </div>
-        <div class="banner" id="banner" hidden></div>
-        <div class="moves-head">
-          <h3>着法</h3>
-          <button class="ghost-btn" id="btn-copy" type="button">复制棋谱</button>
-        </div>
-        <ol class="movelist" id="movelist"></ol>
-        <p class="detail" id="detail"></p>
-      </section>
-      <aside class="seat b" id="seat-b">
-        <div class="seat-head">
-          <div>
-            <h2 id="name-b">黑方</h2>
-            <p class="model" id="model-b"></p>
+        </section>
+
+        <!-- 工具杆 + 棋谱绸带 -->
+        <section class="ledger-bar">
+          <div class="toolbar">
+            <div class="tb-group">
+              <button class="solid-btn" id="btn-start" type="button">开局</button>
+              <button class="ghost-btn" id="btn-pause" type="button">暂停</button>
+              <button class="ghost-btn" id="btn-stop" type="button">停局</button>
+            </div>
+            <div class="tb-group" id="review-bar" hidden>
+              <button class="ghost-btn" id="btn-prev" type="button">上一手</button>
+              <button class="ghost-btn" id="btn-next" type="button">下一手</button>
+              <button class="ghost-btn" id="btn-exit-review" type="button">退出回看</button>
+            </div>
+            <div class="tb-group tb-end">
+              <button class="ghost-btn" id="btn-copy" type="button">复制棋谱</button>
+            </div>
           </div>
-          <div class="clock" id="clock-b">5:00</div>
-        </div>
-        <div class="phase" id="phase-b">待开局</div>
-        <div class="trace" id="trace-b"></div>
+          <ol class="ribbon" id="movelist"></ol>
+          <p class="detail" id="detail"></p>
+        </section>
+      </div>
+
+      <!-- 行棋日志侧栏（VSCode 式） -->
+      <aside class="dock" id="dock">
+        <header class="dock-head">
+          <span class="dock-dot" aria-hidden="true"></span>
+          <h3>行棋日志</h3>
+          <span class="dock-sub">思维链 · 输出 · 工具调用</span>
+        </header>
+        <div class="dock-body" id="dock-log"></div>
       </aside>
-    </div>
+    </main>
   </div>
 
   <dialog id="settings">

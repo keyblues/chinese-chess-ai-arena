@@ -1,9 +1,12 @@
 import { resultText } from "./match.js";
 
-const CELL = 64;
-const PAD = 40;
-const WIDTH = PAD * 2 + CELL * 8;
-const HEIGHT = PAD * 2 + CELL * 9;
+// 横置棋盘：黑在上手（左），红在下手（右）。
+// 列 = 纵线（由 9 路…0 路自左向右），行 = 文件线（a…i 自上而下）。
+const CELLX = 66;
+const CELLY = 58;
+const PAD = 64;
+const WIDTH = PAD * 2 + CELLX * 9;
+const HEIGHT = PAD * 2 + CELLY * 8;
 const PIECE = 52;
 
 const CHAR = {
@@ -19,67 +22,72 @@ const TOOL_LABEL = {
   裁判: "裁判",
 };
 
+function colX(col) {
+  return PAD + col * CELLX;
+}
+
+function rowY(row) {
+  return PAD + row * CELLY;
+}
+
+// ICCS 坐标 -> 屏幕坐标
 function xy(file, rank) {
-  return [PAD + file * CELL, PAD + (9 - rank) * CELL];
+  return [colX(9 - rank), rowY(file)];
 }
 
 function line(x1, y1, x2, y2, cls = "") {
   return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"${cls ? ` class="${cls}"` : ""} />`;
 }
 
-function star(file, rank, corners) {
-  const [x, y] = xy(file, rank);
+function star(col, row, corners) {
+  const x = colX(col);
+  const y = rowY(row);
   const gap = 6;
   const len = 9;
   return corners
-    .map(([sx, sy]) => {
-      const cx = x + sx * gap;
-      const cy = y + sy * gap;
-      return line(cx, cy, cx + sx * len, cy) + line(cx, cy, cx, cy + sy * len);
-    })
+    .map(([sx, sy]) => line(x + sx * gap, y + sy * gap, x + sx * (gap + len), y + sy * gap) + line(x + sx * gap, y + sy * gap, x + sx * gap, y + sy * (gap + len)))
     .join("");
 }
 
 function boardSvg() {
   const parts = [];
-  for (let file = 0; file < 9; file += 1) {
-    const x = xy(file, 0)[0];
-    if (file === 0 || file === 8) parts.push(line(x, xy(0, 0)[1], x, xy(0, 9)[1], "edge"));
-    else {
-      parts.push(line(x, xy(0, 0)[1], x, xy(0, 4)[1]));
-      parts.push(line(x, xy(0, 5)[1], x, xy(0, 9)[1]));
+  // 纵线（10 条 = 10 路），两端边线全高
+  for (let col = 0; col <= 9; col += 1) {
+    parts.push(line(colX(col), rowY(0), colX(col), rowY(8), col === 0 || col === 9 ? "edge" : ""));
+  }
+  // 横线（9 条 = 9 个文件线），边线（a/i）全宽，其余被楚河汉界断开
+  for (let row = 0; row <= 8; row += 1) {
+    if (row === 0 || row === 8) {
+      parts.push(line(colX(0), rowY(row), colX(9), rowY(row), "edge"));
+    } else {
+      parts.push(line(colX(0), rowY(row), colX(4), rowY(row)));
+      parts.push(line(colX(5), rowY(row), colX(9), rowY(row)));
     }
   }
-  for (let rank = 0; rank < 10; rank += 1) {
-    const y = xy(0, rank)[1];
-    parts.push(line(xy(0, 0)[0], y, xy(8, 0)[0], y, rank === 0 || rank === 9 ? "edge" : ""));
-  }
-  const diag = (a, b, c, d) => {
-    const [x1, y1] = xy(a, b);
-    const [x2, y2] = xy(c, d);
-    parts.push(line(x1, y1, x2, y2));
-  };
-  diag(3, 0, 5, 2);
-  diag(5, 0, 3, 2);
-  diag(3, 9, 5, 7);
-  diag(5, 9, 3, 7);
+  // 九宫斜线：黑（左，0-2 列）、红（右，7-9 列）
+  parts.push(line(colX(0), rowY(3), colX(2), rowY(5)));
+  parts.push(line(colX(0), rowY(5), colX(2), rowY(3)));
+  parts.push(line(colX(9), rowY(3), colX(7), rowY(5)));
+  parts.push(line(colX(9), rowY(5), colX(7), rowY(3)));
+  // 炮位与兵位刻痕
   const all = [[1, -1], [-1, -1], [1, 1], [-1, 1]];
-  const right = [[1, -1], [1, 1]];
-  const left = [[-1, -1], [-1, 1]];
-  [[1, 2], [7, 2], [1, 7], [7, 7], [2, 3], [4, 3], [6, 3], [2, 6], [4, 6], [6, 6]].forEach(([file, rank]) => {
-    parts.push(star(file, rank, all));
+  const down = [[1, 1], [-1, 1]];
+  const up = [[1, -1], [-1, -1]];
+  [[7, 1], [7, 7], [2, 1], [2, 7], [6, 2], [6, 4], [6, 6], [3, 2], [3, 4], [3, 6]].forEach(([col, row]) => {
+    parts.push(star(col, row, all));
   });
-  parts.push(star(0, 3, right), star(0, 6, right), star(8, 3, left), star(8, 6, left));
-  const riverY = (xy(0, 4)[1] + xy(0, 5)[1]) / 2;
-  parts.push(`<text class="river" x="${xy(2, 0)[0]}" y="${riverY}" text-anchor="middle" dominant-baseline="middle">楚河</text>`);
-  parts.push(`<text class="river" x="${xy(6, 0)[0]}" y="${riverY}" text-anchor="middle" dominant-baseline="middle">汉界</text>`);
-  for (let file = 0; file < 9; file += 1) {
-    const [x] = xy(file, 0);
-    parts.push(`<text class="coord" x="${x}" y="${xy(0, 0)[1] + 24}" text-anchor="middle">${"abcdefghi"[file]}</text>`);
+  parts.push(star(6, 0, down), star(3, 0, down), star(6, 8, up), star(3, 8, up));
+  // 楚河汉界（竖排于河界带）
+  const riverX = colX(4.5);
+  [["楚", 1.55], ["河", 2.75], ["汉", 5.25], ["界", 6.45]].forEach(([text, row]) => {
+    parts.push(`<text class="river" x="${riverX}" y="${rowY(row)}" text-anchor="middle" dominant-baseline="middle">${text}</text>`);
+  });
+  // 坐标：路号 9…0 于上缘，文件 a…i 于左缘（避开边线棋子的圆盘）
+  for (let rank = 0; rank <= 9; rank += 1) {
+    parts.push(`<text class="coord" x="${colX(9 - rank)}" y="${PAD - 38}" text-anchor="middle" dominant-baseline="middle">${rank}</text>`);
   }
-  for (let rank = 0; rank < 10; rank += 1) {
-    const y = xy(0, rank)[1];
-    parts.push(`<text class="coord" x="${PAD - 18}" y="${y}" text-anchor="middle" dominant-baseline="middle">${rank}</text>`);
+  for (let file = 0; file <= 8; file += 1) {
+    parts.push(`<text class="coord" x="${PAD - 38}" y="${rowY(file)}" text-anchor="middle" dominant-baseline="middle">${"abcdefghi"[file]}</text>`);
   }
   return `<svg viewBox="0 0 ${WIDTH} ${HEIGHT}" aria-hidden="true">${parts.join("")}</svg>`;
 }
@@ -154,6 +162,10 @@ export function createUI(callbacks) {
   function fitBoard() {
     const scale = Math.min(1, fit.clientWidth / WIDTH);
     board.style.transform = `scale(${scale})`;
+    board.style.transformOrigin = "top left";
+    board.style.position = "absolute";
+    board.style.left = "0";
+    board.style.top = "0";
     fit.style.height = `${HEIGHT * scale}px`;
   }
 
@@ -215,64 +227,37 @@ export function createUI(callbacks) {
     }, 340);
   }
 
-  function syncTrace(side, items, active) {
-    const root = document.querySelector(`#trace-${side}`);
-    const list = items || [];
-    if (!list.length) {
-      root.innerHTML = active
-        ? `<p class="trace-empty">正在请求模型。思维链和工具调用会逐段出现。</p>`
-        : `<p class="trace-empty">等待行棋。模型要先调用 legal_moves，再调用 commit_move。口头着法不算数。</p>`;
-      return;
-    }
-    const keys = list.map((item, index) => item.id || `${index}-${item.kind}-${item.title}`);
-    [...root.children].forEach((child) => {
-      if (!keys.includes(child.dataset.key)) child.remove();
-    });
-    list.forEach((item, index) => {
-      const key = keys[index];
-      let card = root.querySelector(`[data-key="${CSS.escape(key)}"]`);
-      if (!card) {
-        card = document.createElement("article");
-        card.dataset.key = key;
-        card.innerHTML = "<header></header><pre class='body'></pre><pre class='result'></pre>";
-        root.append(card);
-      }
-      card.className = `trace-card ${item.kind || ""} ${item.ok === false ? "bad" : ""} ${item.pending ? "pending" : ""}`;
-      const title = item.kind === "tool" ? TOOL_LABEL[item.title] || item.title : item.title;
-      card.querySelector("header").innerHTML = item.kind === "tool" ? `<span>工具</span><strong>${escapeText(title)}</strong>` : escapeText(title);
-      card.querySelector(".body").textContent = item.body || "";
-      card.querySelector(".result").textContent = item.result || "";
-    });
-    root.scrollTop = root.scrollHeight;
-  }
-
   function renderMoves(snap) {
     const list = document.querySelector("#movelist");
     const moves = snap.moves || [];
     const focus = snap.focusPly ?? moves.length;
     list.innerHTML = "";
-    for (let i = 0; i < moves.length; i += 2) {
-      const row = document.createElement("li");
-      const num = document.createElement("span");
-      num.className = "num";
-      num.textContent = String(i / 2 + 1);
-      row.append(num);
-      [i, i + 1].forEach((index) => {
-        if (!moves[index]) {
-          row.append(document.createElement("span"));
-          return;
-        }
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = moves[index].notation;
-        if (index + 1 === focus) button.className = "on";
-        button.addEventListener("click", () => callbacks.onPly?.(index + 1));
-        row.append(button);
-      });
-      list.append(row);
+    for (let i = 0; i < moves.length; i += 1) {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `mv ${moves[i].side === "r" ? "r" : "b"}`;
+      if (i + 1 === focus) button.classList.add("on");
+      const no = document.createElement("span");
+      no.className = "no";
+      no.textContent = String(Math.floor(i / 2) + 1);
+      button.append(no, document.createTextNode(moves[i].notation));
+      button.addEventListener("click", () => callbacks.onPly?.(i + 1));
+      li.append(button);
+      list.append(li);
     }
     const shown = moves[Math.max(0, focus - 1)];
     document.querySelector("#detail").textContent = shown?.thought ? `${shown.notation} · ${shown.thought}` : "";
+    // 只在绸带内横向滚动，避免把整页竖直拽动
+    const focused = list.querySelector(".on");
+    if (focused) {
+      const left = focus >= moves.length
+        ? focused.offsetLeft + focused.offsetWidth + 28 - list.clientWidth
+        : focused.offsetLeft - list.clientWidth / 2;
+      list.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+    } else {
+      list.scrollLeft = list.scrollWidth;
+    }
   }
 
   function setClocks(clocks) {
@@ -282,6 +267,119 @@ export function createUI(callbacks) {
       el.classList.toggle("low", clocks[side] < 30000);
     });
   }
+
+  /* ---------- 行棋日志坞：双方面板按时间序合流 ---------- */
+  const dockBody = document.querySelector("#dock-log");
+  const dockState = { entries: [], map: new Map(), seeded: false };
+
+  function dockEntryEl(entry) {
+    const el = document.createElement("div");
+    el.className = `log-entry ${entry.kind} ${entry.ok === false ? "bad" : ""} ${entry.pending ? "pending" : ""}`;
+    el.dataset.key = entry.key;
+    const head = document.createElement("div");
+    head.className = "log-head";
+    const tag = document.createElement("i");
+    tag.className = `side-tag ${entry.side}`;
+    tag.textContent = entry.side === "r" ? "红" : "黑";
+    const title = document.createElement("b");
+    head.append(tag, title, Object.assign(document.createElement("span"), { className: "log-turn", textContent: entry.turn }));
+    el.append(head);
+    const body = document.createElement("pre");
+    body.className = "log-body";
+    el.append(body);
+    if (entry.result) {
+      const result = document.createElement("pre");
+      result.className = "log-body log-result";
+      el.append(result);
+    }
+    dockBody.append(el);
+    return el;
+  }
+
+  function dockPaintText(entry) {
+    const el = entry.el;
+    const title = entry.kind === "tool" ? TOOL_LABEL[entry.title] || entry.title : entry.title || (entry.kind === "think" ? "思维链" : "输出");
+    el.querySelector(".log-head b").textContent = title;
+    el.querySelector(".log-head .log-turn").textContent = entry.turn;
+    el.className = `log-entry ${entry.kind} ${entry.ok === false ? "bad" : ""} ${entry.pending ? "pending" : ""}${entry.long ? " foldable" : ""}${entry.open ? " open" : ""}`;
+    el.querySelector(".log-body").textContent = entry.body || "";
+    const resultEl = el.querySelector(".log-result");
+    if (resultEl) resultEl.textContent = entry.result || "";
+  }
+
+  function dockPush(key, side, item, turn) {
+    const body = String(item.body || "");
+    const entry = {
+      key,
+      side,
+      kind: item.kind || "think",
+      title: item.title || "",
+      body,
+      result: String(item.result || ""),
+      ok: item.ok,
+      pending: item.pending,
+      turn: `第${turn}回合`,
+      long: body.length > 220 || String(item.result || "").length > 160,
+      open: false,
+      el: null,
+    };
+    entry.el = dockEntryEl(entry);
+    dockPaintText(entry);
+    dockState.entries.push(entry);
+    dockState.map.set(key, entry);
+    while (dockState.entries.length > 240) {
+      const old = dockState.entries.shift();
+      old.el.remove();
+      dockState.map.delete(old.key);
+    }
+  }
+
+  function dockSync(snap) {
+    if (!dockState.seeded) {
+      dockState.seeded = true;
+      const moves = snap.moves || [];
+      moves.slice(-6).forEach((record, offset) => {
+        const ply = moves.length - moves.slice(-6).length + offset + 1;
+        (record.trace || []).forEach((item, idx) => {
+          dockPush(`${record.side}:${ply}:${idx}`, record.side, { ...item, pending: false }, Math.floor((ply - 1) / 2) + 1);
+        });
+      });
+    }
+    const nearBottom = dockBody.scrollTop + dockBody.clientHeight >= dockBody.scrollHeight - 80;
+    let added = false;
+    const round = Math.floor((snap.moves?.length || 0) / 2) + 1;
+    ["b", "r"].forEach((side) => {
+      (snap.traces?.[side] || []).forEach((item, idx) => {
+        const key = `${side}:${snap.moves?.length || 0}:${item.id || idx}`;
+        const entry = dockState.map.get(key);
+        if (!entry) {
+          dockPush(key, side, item, round);
+          added = true;
+          return;
+        }
+        const body = String(item.body || "");
+        const result = String(item.result || "");
+        if (entry.body !== body || entry.result !== result || entry.ok !== item.ok || entry.pending !== item.pending) {
+          entry.body = body;
+          entry.result = result;
+          entry.ok = item.ok;
+          entry.pending = item.pending;
+          entry.long = entry.long || body.length > 220 || result.length > 160;
+          dockPaintText(entry);
+        }
+      });
+    });
+    if (added || nearBottom) dockBody.scrollTop = dockBody.scrollHeight;
+  }
+
+  dockBody.addEventListener("click", (event) => {
+    const el = event.target.closest(".log-entry");
+    if (!el) return;
+    const entry = dockState.map.get(el.dataset.key);
+    if (!entry?.long) return;
+    entry.open = !entry.open;
+    dockPaintText(entry);
+  });
 
   function update(snap) {
     state.snap = snap;
@@ -293,8 +391,8 @@ export function createUI(callbacks) {
       document.querySelector(`#name-${side}`).textContent = snap.players?.[side]?.name || (side === "r" ? "红方" : "黑方");
       document.querySelector(`#model-${side}`).textContent = snap.players?.[side]?.model || "";
       document.querySelector(`#phase-${side}`).textContent = snap.phase?.[side] || (snap.status === "idle" ? "待开局" : "");
-      syncTrace(side, snap.traces?.[side], snap.active === side);
     });
+    dockSync(snap);
     setClocks(snap.clocks || { r: 0, b: 0 });
     const ply = snap.moves?.length || 0;
     if (snap.fen !== state.fen) {
