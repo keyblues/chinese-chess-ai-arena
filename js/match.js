@@ -136,6 +136,9 @@ export class Match {
     const main = (saved?.mainMinutes ?? settings.mainMinutes) * 60 * 1000;
     this.mainMinutes = saved?.mainMinutes ?? settings.mainMinutes;
     this.clocks = saved?.clocks || { r: main, b: main };
+    // 时钟封顶于起始时制：加秒只补耗时，不让时间倒涨
+    this.clocks.r = Math.min(this.clocks.r, main);
+    this.clocks.b = Math.min(this.clocks.b, main);
     this.traces = { r: saved?.traces?.r || [], b: saved?.traces?.b || [] };
     this.phase = { r: "", b: "" };
     this.preview = null;
@@ -560,7 +563,7 @@ export class Match {
     const side = this.pos.side;
     const spent = this.turnStarted ? Date.now() - this.turnStarted : 0;
     this.settleClock();
-    this.clocks[side] += this.incrementMs;
+    this.clocks[side] = Math.min(this.clocks[side] + this.incrementMs, this.mainMinutes * 60 * 1000);
     const notation = toNotation(this.pos, outcome.move);
     const next = applyMove(this.pos, outcome.move);
     const record = {
