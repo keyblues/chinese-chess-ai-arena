@@ -297,13 +297,28 @@ export function createUI(callbacks) {
     return el;
   }
 
+  // 工具入参是空对象或仅占位字段（如 {"__dummy":""}）时，参数行不值得展示
+  function trivialArgs(body) {
+    const text = String(body || "").trim();
+    if (!text || text === "{}") return true;
+    try {
+      const obj = JSON.parse(text);
+      return !!obj && typeof obj === "object" && !Array.isArray(obj)
+        && Object.keys(obj).every((key) => key === "__dummy" && !String(obj[key]).trim());
+    } catch {
+      return false;
+    }
+  }
+
   function dockPaintText(entry) {
     const el = entry.el;
     const title = entry.kind === "tool" ? TOOL_LABEL[entry.title] || entry.title : entry.title || (entry.kind === "think" ? "思维链" : "输出");
     el.querySelector(".log-head b").textContent = title;
     el.querySelector(".log-head .log-turn").textContent = entry.turn;
     el.className = `log-entry ${entry.kind} ${entry.ok === false ? "bad" : ""} ${entry.pending ? "pending" : ""}${entry.long ? " foldable" : ""}${entry.open ? " open" : ""}`;
-    el.querySelector(".log-body").textContent = entry.body || "";
+    const bodyEl = el.querySelector(".log-body");
+    bodyEl.style.display = entry.kind === "tool" && trivialArgs(entry.body) ? "none" : "";
+    bodyEl.textContent = entry.body || "";
     const resultEl = el.querySelector(".log-result");
     if (resultEl) resultEl.textContent = entry.result || "";
   }
@@ -336,12 +351,14 @@ export function createUI(callbacks) {
   }
 
   function dockSync(snap) {
+    if (snap.review) return; // 回看是历史回放，不进实时日志
     if (!dockState.seeded) {
       dockState.seeded = true;
       const moves = snap.moves || [];
       moves.slice(-6).forEach((record, offset) => {
         const ply = moves.length - moves.slice(-6).length + offset + 1;
         (record.trace || []).forEach((item, idx) => {
+          if ((item.kind === "say" || item.kind === "think") && !String(item.body || "").trim()) return;
           dockPush(`${record.side}:${ply}:${idx}`, record.side, { ...item, pending: false }, Math.floor((ply - 1) / 2) + 1);
         });
       });
@@ -352,6 +369,8 @@ export function createUI(callbacks) {
     document.querySelector("#dock-round").textContent = snap.moves?.length ? `第 ${round} 回合` : "";
     ["b", "r"].forEach((side) => {
       (snap.traces?.[side] || []).forEach((item, idx) => {
+        // 空白"输出/思维链"（模型只吐了空格）不建卡，等有内容再入列
+        if ((item.kind === "say" || item.kind === "think") && !String(item.body || "").trim()) return;
         const key = `${side}:${snap.moves?.length || 0}:${item.id || idx}`;
         const entry = dockState.map.get(key);
         if (!entry) {
