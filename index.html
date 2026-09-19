@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>观弈 · 模型对模型</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <div class="seal">弈</div>
+        <div>
+          <h1>观弈</h1>
+          <p>模型对模型 · 工具调用 · 本地裁判</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="ghost-btn" id="btn-history" type="button">棋谱</button>
+        <button class="ghost-btn" id="btn-settings" type="button">设置</button>
+      </div>
+    </header>
+    <div class="arena">
+      <aside class="seat r" id="seat-r">
+        <div class="seat-head">
+          <div>
+            <h2 id="name-r">红方</h2>
+            <p class="model" id="model-r"></p>
+          </div>
+          <div class="clock" id="clock-r">5:00</div>
+        </div>
+        <div class="phase" id="phase-r">待开局</div>
+        <div class="trace" id="trace-r"></div>
+      </aside>
+      <section class="stage">
+        <div id="status">待开局</div>
+        <div class="board-frame">
+          <div class="board-fit" id="board-fit">
+            <div class="board" id="board"></div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="solid-btn" id="btn-start" type="button">开局</button>
+          <button class="ghost-btn" id="btn-pause" type="button">暂停</button>
+          <button class="ghost-btn" id="btn-stop" type="button">停止</button>
+        </div>
+        <div class="review-bar" id="review-bar" hidden>
+          <button class="ghost-btn" id="btn-prev" type="button">上一手</button>
+          <button class="ghost-btn" id="btn-next" type="button">下一手</button>
+          <button class="ghost-btn" id="btn-exit-review" type="button">退出回看</button>
+        </div>
+        <div class="banner" id="banner" hidden></div>
+        <div class="moves-head">
+          <h3>着法</h3>
+          <button class="ghost-btn" id="btn-copy" type="button">复制棋谱</button>
+        </div>
+        <ol class="movelist" id="movelist"></ol>
+        <p class="detail" id="detail"></p>
+      </section>
+      <aside class="seat b" id="seat-b">
+        <div class="seat-head">
+          <div>
+            <h2 id="name-b">黑方</h2>
+            <p class="model" id="model-b"></p>
+          </div>
+          <div class="clock" id="clock-b">5:00</div>
+        </div>
+        <div class="phase" id="phase-b">待开局</div>
+        <div class="trace" id="trace-b"></div>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="settings">
+    <form class="sheet" id="settings-form">
+      <h3>对局设置</h3>
+      <p class="hint">密钥只写进这台浏览器的 localStorage，不会进源码。双方都用同一接口，模型可以不同。落子必须走工具调用，裁判不接受口头着法。</p>
+      <div class="grid">
+        <label class="wide">接口地址
+          <input id="base-url" name="baseUrl" required />
+        </label>
+        <label class="wide">API Key
+          <input id="api-key" name="apiKey" type="password" autocomplete="off" />
+        </label>
+        <label>温度
+          <input id="temperature" name="temperature" type="number" min="0" max="1.5" step="0.1" />
+        </label>
+        <label>每方时限（分钟）
+          <input id="main-minutes" name="mainMinutes" type="number" min="1" max="60" step="1" />
+        </label>
+        <label>每步加秒
+          <input id="increment" name="incrementSeconds" type="number" min="0" max="60" step="1" />
+        </label>
+      </div>
+      <div class="sides">
+        <div class="side-box">
+          <h4>红方</h4>
+          <label>名称<input id="red-name" /></label>
+          <label>模型<input id="red-model" list="model-list" /></label>
+          <label>风格<textarea id="red-style"></textarea></label>
+        </div>
+        <div class="side-box">
+          <h4>黑方</h4>
+          <label>名称<input id="black-name" /></label>
+          <label>模型<input id="black-model" list="model-list" /></label>
+          <label>风格<textarea id="black-style"></textarea></label>
+        </div>
+      </div>
+      <datalist id="model-list"></datalist>
+      <p class="test-result" id="test-result"></p>
+      <div class="sheet-actions">
+        <button class="ghost-btn" id="btn-test" type="button">测试连接</button>
+        <button class="ghost-btn" id="btn-close-settings" type="button">关闭</button>
+        <button class="solid-btn" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="history">
+    <div class="sheet">
+      <h3>棋谱</h3>
+      <p class="hint">最近 30 局保存在本地。进行中的对局不能把棋盘切去回看。</p>
+      <ul class="history-list" id="history-list"></ul>
+      <div class="sheet-actions">
+        <button class="ghost-btn" id="btn-close-history" type="button">关闭</button>
+      </div>
+    </div>
+  </dialog>
+  <div class="toast" id="toast" hidden></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
