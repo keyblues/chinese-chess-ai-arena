@@ -18,7 +18,7 @@ function makePlayer(name, providerId, model) {
     providerId,
     model,
     contextTokens: 128000,
-    maxOutputTokens: 38000,
+    maxOutputTokens: 8000,
   };
 }
 
@@ -47,7 +47,7 @@ function normalizePlayer(saved, fallback) {
     ...fallback,
     ...(saved || {}),
     contextTokens: Number(saved?.contextTokens) > 0 ? Number(saved.contextTokens) : 128000,
-    maxOutputTokens: Number(saved?.maxOutputTokens) > 0 ? Number(saved.maxOutputTokens) : 38000,
+    maxOutputTokens: Number(saved?.maxOutputTokens) > 0 ? Number(saved.maxOutputTokens) : 8000,
   };
 }
 
