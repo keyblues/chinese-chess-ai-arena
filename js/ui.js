@@ -123,6 +123,10 @@ export function createUI(callbacks) {
   const pieces = board.querySelector(".pieces");
   const state = { fen: "", ply: -1, snap: null, timer: 0 };
 
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => fitBoard()).observe(fit.parentElement);
+  }
+
   function place(el, file, rank) {
     const [x, y] = xy(file, rank);
     el.style.left = `${x - PIECE / 2}px`;
@@ -150,13 +154,21 @@ export function createUI(callbacks) {
   }
 
   function fitBoard() {
-    const scale = Math.min(1, fit.clientWidth / WIDTH);
+    // 桌面（≥1121px）：主列剩余高度全给棋盘区，宽高双约束取最小缩放，可与页面同伸缩；
+    // 窄屏（文档流）：按宽度适配。
+    const frame = fit.parentElement;
+    const availW = Math.max(200, frame.clientWidth);
+    const desktop = window.matchMedia("(min-width: 1121px)").matches;
+    const scale = desktop
+      ? Math.min(availW / WIDTH, Math.max(240, frame.clientHeight) / HEIGHT, 1.35)
+      : Math.min(1, availW / WIDTH);
+    fit.style.width = `${WIDTH * scale}px`;
+    fit.style.height = `${HEIGHT * scale}px`;
     board.style.transform = `scale(${scale})`;
     board.style.transformOrigin = "top left";
     board.style.position = "absolute";
     board.style.left = "0";
     board.style.top = "0";
-    fit.style.height = `${HEIGHT * scale}px`;
   }
 
   function drawMarks(snap) {

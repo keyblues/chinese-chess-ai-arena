@@ -156,7 +156,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
     overflow: hidden;
     padding-bottom: 18px;
   }
-  .arena { overflow-y: auto; }
+  /* 主列内容由 flex 分配高度，棋盘自适应填满，不再滚动 */
+  .arena { overflow: hidden; }
   /* 提高优先级：盖过文件后部 .dock 的 max-height/height，让日志坞固定延伸到底 */
   .workbench .dock {
     max-height: none;
@@ -281,12 +282,17 @@ button, input, textarea, select { font: inherit; color: inherit; }
   pointer-events: none;
 }
 
-/* ---------- 棋盘（主角） ---------- */
-.board-frame { width: 100%; display: flex; justify-content: center; }
+/* ---------- 棋盘（主角，随页面尺寸伸缩） ---------- */
+.board-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
 /* 容器负责裁剪与投影：board 的布局盒固定 WIDTH px，按比例缩放后恰好铺满容器 */
 .board-fit {
-  width: 100%;
-  max-width: 722px;
   position: relative;
   overflow: hidden;
   border-radius: 12px;
