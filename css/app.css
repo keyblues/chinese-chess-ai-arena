@@ -157,7 +157,12 @@ button, input, textarea, select { font: inherit; color: inherit; }
     padding-bottom: 18px;
   }
   .arena { overflow-y: auto; }
-  .dock { max-height: none; }
+  /* 提高优先级：盖过文件后部 .dock 的 max-height/height，让日志坞固定延伸到底 */
+  .workbench .dock {
+    max-height: none;
+    height: 100%;
+    min-height: 0;
+  }
 }
 
 /* ---------- 双方名牌 ---------- */
