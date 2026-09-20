@@ -561,12 +561,17 @@ export function createUI(callbacks) {
 
   function collectProviders() {
     return [...document.querySelectorAll(".provider-row")]
-      .map((row) => ({
-        id: row.dataset.id || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-        name: row.querySelector(".pr-name").value.trim(),
-        baseUrl: row.querySelector(".pr-url").value.trim(),
-        apiKey: row.querySelector(".pr-key").value.trim(),
-      }))
+      .map((row) => {
+        // 新增行的 id 必须当场写回 DOM：每次读都现生成一个的话，
+        // 保存的 providerId 和 providers[].id 对不上，红黑双方会静默跑到别人的供应商上去
+        if (!row.dataset.id) row.dataset.id = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        return {
+          id: row.dataset.id,
+          name: row.querySelector(".pr-name").value.trim(),
+          baseUrl: row.querySelector(".pr-url").value.trim(),
+          apiKey: row.querySelector(".pr-key").value.trim(),
+        };
+      })
       .filter((provider) => provider.baseUrl || provider.apiKey || provider.name);
   }
 
@@ -645,9 +650,9 @@ export function createUI(callbacks) {
     });
   }
 
-  function setModels(ids) {
-    const list = document.querySelector("#model-list");
-    list.innerHTML = ids.map((id) => `<option value="${escapeText(id)}"></option>`).join("");
+  function setModels(side, ids) {
+    const list = document.querySelector(`#${side}-model-list`);
+    if (list) list.innerHTML = ids.map((id) => `<option value="${escapeText(id)}"></option>`).join("");
   }
 
   function setTestResult(text, ok) {
@@ -675,6 +680,13 @@ export function createUI(callbacks) {
   document.querySelector("#btn-add-provider").addEventListener("click", () => {
     document.querySelector("#provider-rows").append(providerRow({}));
     refreshProviderOptions();
+  });
+  // 新增的供应商边填边进下拉：不用再增删一行去"刷新"，也不必等失焦
+  document.querySelector("#provider-rows").addEventListener("input", refreshProviderOptions);
+  document.querySelector("#provider-rows").addEventListener("change", refreshProviderOptions);
+  // 换了供应商，上一家的模型候选就作废，免得把别人家的模型 id 填进来
+  ["red", "black"].forEach((side) => {
+    document.querySelector(`#${side}-provider`).addEventListener("change", () => setModels(side, []));
   });
   document.querySelector("#btn-history").addEventListener("click", () => document.querySelector("#history").showModal());
   document.querySelector("#btn-close-history").addEventListener("click", () => document.querySelector("#history").close());

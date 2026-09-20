@@ -107,7 +107,7 @@
           <h4>红方</h4>
           <label>名称<input id="red-name" /></label>
           <label>供应商<select id="red-provider"></select></label>
-          <label>模型<input id="red-model" list="model-list" /></label>
+          <label>模型<input id="red-model" list="red-model-list" /></label>
           <div class="pair">
             <label>上下文<input id="red-context" type="number" min="1024" /></label>
             <label>最大输出<input id="red-maxout" type="number" min="256" /></label>
@@ -117,14 +117,15 @@
           <h4>黑方</h4>
           <label>名称<input id="black-name" /></label>
           <label>供应商<select id="black-provider"></select></label>
-          <label>模型<input id="black-model" list="model-list" /></label>
+          <label>模型<input id="black-model" list="black-model-list" /></label>
           <div class="pair">
             <label>上下文<input id="black-context" type="number" min="1024" /></label>
             <label>最大输出<input id="black-maxout" type="number" min="256" /></label>
           </div>
         </div>
       </div>
-      <datalist id="model-list"></datalist>
+      <datalist id="red-model-list"></datalist>
+      <datalist id="black-model-list"></datalist>
       <p class="test-result" id="test-result"></p>
       <div class="sheet-actions">
         <button class="ghost-btn" id="btn-test" type="button">测试连接</button>

@@ -77,15 +77,23 @@ function migrateLegacy(saved, defaults) {
   };
 }
 
+// 历史遗留：旧版新增供应商时 id 是每次读取现生成的，存下来的 providerId 可能谁也对不上。
+// 对不上就归到第一个供应商（与旧的兜底行为一致），免得"选了 A 却拿着 B 的密钥开局"。
+function repairPlayer(player, providers) {
+  if (providers.some((provider) => provider.id === player.providerId)) return player;
+  return { ...player, providerId: providers[0]?.id || "" };
+}
+
 export function loadSettings() {
   const saved = read(SETTINGS_KEY, {});
   if (Array.isArray(saved.providers) && saved.providers.length) {
+    const providers = saved.providers.map(normalizeProvider);
     return {
       ...defaultSettings,
       ...saved,
-      providers: saved.providers.map(normalizeProvider),
-      red: normalizePlayer(saved.red, defaultSettings.red),
-      black: normalizePlayer(saved.black, defaultSettings.black),
+      providers,
+      red: repairPlayer(normalizePlayer(saved.red, defaultSettings.red), providers),
+      black: repairPlayer(normalizePlayer(saved.black, defaultSettings.black), providers),
     };
   }
   return migrateLegacy(saved, defaultSettings);

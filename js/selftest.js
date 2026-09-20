@@ -12,7 +12,7 @@ import {
   toFEN,
 } from "./engine.js";
 import { toNotation } from "./notation.js";
-import { loadMatches, saveActive, saveMatch } from "./storage.js";
+import { loadMatches, loadSettings, saveActive, saveMatch } from "./storage.js";
 import { dockRank } from "./ui.js";
 
 function iccsSet(pos) {
@@ -203,3 +203,28 @@ console.log("dock order ok");
   assert.doesNotThrow(() => saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }));
 }
 console.log("storage ok");
+
+// 供应商：旧版新增行的 id 是每次读取现生成的，存档里的 providerId 可能谁也对不上。
+// 载入时必须自愈到第一个供应商（否则红方会拿着黑方的地址和密钥开局）
+{
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, value),
+    removeItem: (key) => store.delete(key),
+  };
+  store.set("xq.settings", JSON.stringify({
+    providers: [
+      { id: "pA", name: "A", baseUrl: "https://a.test/v1", apiKey: "ka" },
+      { id: "pB", name: "B", baseUrl: "https://b.test/v1", apiKey: "kb" },
+    ],
+    red: { name: "红", providerId: "p_ghost_999", model: "m1" },
+    black: { name: "黑", providerId: "pB", model: "m2" },
+  }));
+  const settings = loadSettings();
+  assert.equal(settings.red.providerId, "pA", "对不上的 providerId 要修到第一个供应商");
+  assert.equal(settings.black.providerId, "pB", "对得上的不许动");
+  assert.equal(settings.red.model, "m1", "修复不能顺手把别的字段改掉");
+  assert.ok(settings.providers.some((provider) => provider.id === settings.red.providerId));
+}
+console.log("settings ok");

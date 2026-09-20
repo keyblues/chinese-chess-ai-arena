@@ -156,17 +156,26 @@ function paint() {
   else ui.update(idleSnapshot());
 }
 
-function providerFor(side) {
-  return settings.providers.find((provider) => provider.id === side.providerId) || settings.providers[0] || null;
+// 供应商只看 id：找不到就是找不到，绝不退回 providers[0]——那样红方会拿着黑方的地址和密钥开局
+function providerById(providers, id) {
+  return providers.find((provider) => provider.id === id) || null;
 }
 
 function startMatch() {
   settings = ui.readSettings();
   saveSettings(settings);
-  const redProvider = providerFor(settings.red);
-  const blackProvider = providerFor(settings.black);
-  if (!redProvider?.baseUrl || !redProvider.apiKey || !blackProvider?.baseUrl || !blackProvider.apiKey) {
-    ui.toast("双方所选供应商都要填接口地址和 API Key");
+  const redProvider = providerById(settings.providers, settings.red.providerId);
+  const blackProvider = providerById(settings.providers, settings.black.providerId);
+  if (!redProvider || !blackProvider) {
+    ui.toast("所选的供应商不存在了，请在设置里重新选择红黑双方的供应商");
+    ui.openSettings();
+    return;
+  }
+  const missing = [];
+  if (!redProvider.baseUrl || !redProvider.apiKey) missing.push("红方");
+  if (!blackProvider.baseUrl || !blackProvider.apiKey) missing.push("黑方");
+  if (missing.length) {
+    ui.toast(`${missing.join("、")}所选供应商要填接口地址和 API Key`);
     ui.openSettings();
     return;
   }
@@ -190,19 +199,28 @@ function togglePause() {
 
 async function testApi() {
   const draft = ui.readSettings();
-  const provider = draft.providers.find((item) => item.id === draft.red.providerId) || draft.providers[0];
-  if (!provider?.baseUrl || !provider.apiKey) {
-    ui.setTestResult("红方所选供应商需要接口地址和 API Key", false);
-    return;
+  const lines = [];
+  let ok = true;
+  for (const side of ["red", "black"]) {
+    const label = side === "red" ? "红方" : "黑方";
+    const player = draft[side];
+    const provider = providerById(draft.providers, player.providerId);
+    if (!provider?.baseUrl || !provider.apiKey) {
+      ok = false;
+      lines.push(`${label}：供应商缺接口地址或 API Key`);
+      continue;
+    }
+    try {
+      const result = await testConnection({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: player.model });
+      // 模型候选按供应商各家一份，别把红方那家的模型塞给黑方
+      if (result.models?.length) ui.setModels(side, result.models);
+      lines.push(`${label}·${provider.name || "供应商"}：${result.message}`);
+    } catch (error) {
+      ok = false;
+      lines.push(`${label}·${provider.name || "供应商"}：${error.message || String(error)}`);
+    }
   }
-  ui.setTestResult("正在连接…");
-  try {
-    const result = await testConnection({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: draft.red.model });
-    if (result.models?.length) ui.setModels(result.models);
-    ui.setTestResult(result.message, true);
-  } catch (error) {
-    ui.setTestResult(error.message || String(error), false);
-  }
+  ui.setTestResult(lines.join("\n"), ok);
 }
 
 function openHistory(id) {
