@@ -88,6 +88,13 @@ function capRejected(error) {
   return /HTTP 4\d\d/.test(text) && /max_?tokens|max_completion_tokens|max(imum)? output/i.test(text);
 }
 
+// DeepSeek 官方 API 在带 tools 时要求把上一轮的推理原文（reasoning_content）原样回传，不带会 400。
+// 默认不回传（越长的历史越慢），被拒一次之后整局都带上。
+function reasoningRejected(error) {
+  const text = String(error?.message || "");
+  return /HTTP 4\d\d/.test(text) && /reasoning/i.test(text);
+}
+
 function repetition(records, positions) {
   const key = positions[positions.length - 1];
   const indices = [];
@@ -187,6 +194,8 @@ export class Match {
     this.emitTimer = 0;
     // 被截断过的模型不用每回合重新学一遍：把抬高过的输出上限记在手上，下回合直接从这里起步
     this.capFloor = { r: 0, b: 0 };
+    // 该接口是否要求把推理原文回传（DeepSeek 官方带 tools 时要求），见 reasoningRejected
+    this.echoReasoning = false;
   }
 
   providerOf(side) {
@@ -510,7 +519,7 @@ export class Match {
           baseUrl: this.providerOf(side).baseUrl,
           apiKey: this.providerOf(side).apiKey,
           model: player.model,
-          messages: trimMessages(messages, player.contextTokens),
+          messages: trimMessages(messages, player.contextTokens, this.echoReasoning),
           tools: TOOLS,
           temperature: this.temperature,
           maxTokens: cap,
@@ -556,6 +565,22 @@ export class Match {
             ok: false,
           });
           messages.push({ role: "user", content: "不要写分析，直接调用 commit_move 提交一步合法着法。" });
+          this.emit();
+          continue;
+        }
+        // 该接口要求回传推理原文：开启后重发，本局后续都带着
+        if (!this.echoReasoning && reasoningRejected(error)) {
+          this.echoReasoning = true;
+          traceAdd(trace, {
+            id: `nudge-${step}`,
+            ply: turnPly,
+            kind: "tool",
+            title: "裁判",
+            body: "",
+            result: "该接口要求把推理原文回传给模型（DeepSeek 官方带 tools 时如此）。已开启后重发。",
+            pending: false,
+            ok: false,
+          });
           this.emit();
           continue;
         }
@@ -615,7 +640,9 @@ export class Match {
           function: { name: call.name, arguments: call.arguments || "{}" },
         })),
       };
-      // 推理原文不回传历史：DeepSeek 官方建议不传，且越长的上下文只会让下一手越慢
+      // 推理原文默认不回传历史（DeepSeek 官方建议不传，且越长的上下文只会让下一手越慢）；
+      // 是否随请求发出、要不要补空串，统一由 trimMessages 按 echoReasoning 决定
+      if (acc.reasoning) assistant.reasoning_content = acc.reasoning;
       messages.push(assistant);
 
       let finished = null;
@@ -781,10 +808,16 @@ function messagesTokens(messages) {
 }
 
 // 轮内对话逼近模型上下文时，先丢推理原文，再从最旧的一组（assistant + 其 tool 结果）开始丢。
-function trimMessages(messages, contextTokens) {
-  let list = messages.map((message) =>
-    message.role === "assistant" && message.reasoning_content ? { ...message, reasoning_content: undefined } : message,
-  );
+// echoReasoning 为真（该接口要求回传推理原文）时反过来：每条 assistant 都补齐这个字段（没有推理也要空串），
+// 只按上下文预算丢旧组。
+function trimMessages(messages, contextTokens, echoReasoning = false) {
+  let list = messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    if (echoReasoning) {
+      return typeof message.reasoning_content === "string" ? message : { ...message, reasoning_content: "" };
+    }
+    return message.reasoning_content ? { ...message, reasoning_content: undefined } : message;
+  });
   const budget = Math.max(4096, Math.floor((Number(contextTokens) || 128000) * 0.7));
   while (list.length > 2 && messagesTokens(list) > budget) {
     let end = 3;

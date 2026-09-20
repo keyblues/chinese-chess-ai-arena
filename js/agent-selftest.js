@@ -50,7 +50,7 @@ globalThis.fetch = async (_url, options) => {
   requests.push(body);
   const next = script.shift();
   assert.ok(next, "测试脚本用完了响应，但 Agent 又发了一次请求");
-  return next;
+  return typeof next === "function" ? next(body) : next;
 };
 
 function makeMatch(maxOutputTokens = 8000) {
@@ -168,6 +168,26 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.equal(outcome.kind, "move", "被 400 拒绝后仍要在原上限下把这一步走完");
   assert.deepEqual(caps(), [8000, 16000, 8000], "退回原上限重发，而不是一路抬高");
   assert.match(match.traces.r.find((item) => item.id === "nudge-1").result, /硬顶/);
+}
+
+// 8) DeepSeek 官方带 tools 时要求回传推理原文：先 400 一次，认出后整局都带上
+{
+  const strict = (body) => {
+    const assistants = body.messages.filter((message) => message.role === "assistant");
+    if (assistants.some((message) => typeof message.reasoning_content !== "string")) {
+      return httpError(400, "reasoning_content is required when tools are provided");
+    }
+    if (assistants.length === 0) return toolCall("legal_moves", {});
+    return toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
+  };
+  const { match, outcome } = await play([strict, strict, strict]);
+  assert.equal(outcome.kind, "move", "认出口径后要把这一步走完");
+  assert.equal(requests.length, 3, "400 之后重发一次就该成功");
+  assert.equal(requests[1].messages.some((message) => message.role === "assistant" && !("reasoning_content" in message)), true, "默认不回传推理原文");
+  const echoed = requests[2].messages.filter((message) => message.role === "assistant");
+  assert.ok(echoed.length > 0);
+  assert.equal(echoed.every((message) => typeof message.reasoning_content === "string"), true, "被拒之后所有 assistant 消息都带推理原文");
+  assert.equal(match.echoReasoning, true);
 }
 
 console.log("agent loop ok");
