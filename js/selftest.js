@@ -12,6 +12,7 @@ import {
   toFEN,
 } from "./engine.js";
 import { toNotation } from "./notation.js";
+import { loadMatches, saveActive, saveMatch } from "./storage.js";
 import { dockRank } from "./ui.js";
 
 function iccsSet(pos) {
@@ -173,3 +174,32 @@ assert.ok(dockRank(0, { id: "nudge-0" }) > dockRank(0, { id: "tool-0-0" }), "裁
 assert.ok(dockRank(0, { id: "tool-0-1" }) > dockRank(0, { id: "tool-0-0" }), "同一步的多次工具调用按序号");
 assert.equal(dockRank(2, { id: "think-1" }), dockRank(2, { id: "think-1" }), "同一个条目反复渲染必须落同一位置");
 console.log("dock order ok");
+
+// 存储配额：写不进 localStorage 时不许抛（persist 在每手落子之后，抛出去会被判成"中断"终结对局）
+{
+  const store = new Map();
+  const limit = 2;
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => {
+      if (key === "xq.active" && value.length > 200) throw new Error("QuotaExceededError");
+      if (key === "xq.matches" && JSON.parse(value).length > limit) throw new Error("QuotaExceededError");
+      store.set(key, value);
+    },
+    removeItem: (key) => store.delete(key),
+  };
+  const record = (id) => ({ id, startedAt: Date.now(), moves: [], result: null, players: { r: { name: "红" }, b: { name: "黑" } } });
+  assert.equal(saveMatch(record("m1")).length, 1);
+  assert.equal(saveMatch(record("m2")).length, 2);
+  assert.equal(saveMatch(record("m3")).length, 2, "配额满时保存要自己砍旧局");
+  assert.equal(loadMatches().length, 2, "砍完之后落盘的确实是能放下的一版");
+  assert.equal(loadMatches()[0].id, "m3", "最新一局必须留住");
+  assert.doesNotThrow(() => saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }), "未完成对局写不下时也要静默放过");
+
+  globalThis.localStorage.setItem = () => {
+    throw new Error("QuotaExceededError");
+  };
+  assert.doesNotThrow(() => saveMatch(record("m4")), "一个字都写不进去时同样不许抛");
+  assert.doesNotThrow(() => saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }));
+}
+console.log("storage ok");

@@ -133,7 +133,7 @@ export function createUI(callbacks) {
   board.innerHTML = `<div class="board-wood"></div>${boardSvg()}<div class="marks"></div><div class="pieces"></div>`;
   const marks = board.querySelector(".marks");
   const pieces = board.querySelector(".pieces");
-  const state = { fen: "", ply: -1, snap: null, timer: 0, movesStamp: "" };
+  const state = { fen: "", ply: -1, snap: null, timer: 0, movesStamp: "", movesRef: null };
 
   if (window.ResizeObserver) {
     new ResizeObserver(() => fitBoard()).observe(fit.parentElement);
@@ -245,9 +245,11 @@ export function createUI(callbacks) {
     const list = document.querySelector("#movelist");
     const moves = snap.moves || [];
     const focus = snap.focusPly ?? moves.length;
-    // 流式期间每个 token 都会走到这里：棋子数/焦点没变就不重建整条绸带
+    // 流式期间每个 token 都会走到这里：棋谱没换、手数/焦点没变就不重建整条绸带
     const stamp = `${snap.status}:${moves.length}:${focus}`;
-    if (state.movesStamp === stamp) return;
+    const sameList = state.movesRef === moves;
+    state.movesRef = moves;
+    if (sameList && state.movesStamp === stamp) return;
     state.movesStamp = stamp;
     list.innerHTML = "";
     for (let i = 0; i < moves.length; i += 1) {
@@ -287,7 +289,7 @@ export function createUI(callbacks) {
 
   /* ---------- 行棋日志坞：双方面板按时间序合流 ---------- */
   const dockBody = document.querySelector("#dock-log");
-  const dockState = { entries: [], map: new Map(), seeded: false };
+  const dockState = { entries: [], map: new Map(), seeded: false, matchId: "" };
 
   function dockEntryEl(entry) {
     const el = document.createElement("div");
@@ -339,11 +341,12 @@ export function createUI(callbacks) {
     if (resultEl) resultEl.textContent = entry.result || "";
   }
 
-  function dockPush(key, side, item, ply, stepFallback = 0) {
+  function dockPush(key, side, item, ply, stepFallback = 0, live = false) {
     const body = String(item.body || "");
     const entry = {
       key,
       side,
+      live,
       kind: item.kind || "think",
       title: item.title || "",
       body,
@@ -368,6 +371,21 @@ export function createUI(callbacks) {
     }
   }
 
+  function dockRemove(entry) {
+    entry.el.remove();
+    dockState.map.delete(entry.key);
+    const at = dockState.entries.indexOf(entry);
+    if (at >= 0) dockState.entries.splice(at, 1);
+  }
+
+  // 换了一局就换一本日志：上一局的卡片不能留在新对局里
+  function dockReset() {
+    dockState.entries.length = 0;
+    dockState.map.clear();
+    dockBody.innerHTML = "";
+    dockState.seeded = false;
+  }
+
   // 新条目按排序键落位：晚到的工具结果、后一回合的条目都不会再插到旧条目上面
   function dockPlace(entry) {
     for (const child of dockBody.children) {
@@ -383,6 +401,8 @@ export function createUI(callbacks) {
   function dockSync(snap) {
     if (snap.review) return; // 回看是历史回放，不进实时日志
     const moves = snap.moves || [];
+    if (snap.id && dockState.matchId && snap.id !== dockState.matchId) dockReset();
+    if (snap.id) dockState.matchId = snap.id;
     if (!dockState.seeded) {
       dockState.seeded = true;
       const from = Math.max(0, moves.length - 6);
@@ -399,15 +419,20 @@ export function createUI(callbacks) {
     const round = Math.floor(moves.length / 2) + 1;
     document.querySelector("#dock-round").textContent = moves.length ? `第 ${round} 回合` : "";
     ["b", "r"].forEach((side) => {
+      const live = new Set();
+      // 恢复的对局里条目没有自己的 ply：退回"这条 trace 属于哪一手"，
+      // 这样它和已经按棋谱播过的卡片是同一个键，只更新、不重复画
+      const tracePly = Number.isFinite(snap.tracePly?.[side]) ? snap.tracePly[side] : moves.length;
       (snap.traces?.[side] || []).forEach((item, idx) => {
         // 空白"输出/思维链"（模型只吐了空格）不建卡，等有内容再入列
         if ((item.kind === "say" || item.kind === "think") && !String(item.body || "").trim()) return;
         // 键里带条目自己的回合号（item.ply），落子后同一个条目不会被当成新条目重复入列
-        const ply = Number.isFinite(item.ply) ? item.ply : moves.length;
+        const ply = Number.isFinite(item.ply) ? item.ply : tracePly;
         const key = `${side}:${ply}:${item.id || idx}`;
+        live.add(key);
         const entry = dockState.map.get(key);
         if (!entry) {
-          dockPush(key, side, item, ply, idx);
+          dockPush(key, side, item, ply, idx, true);
           added = true;
           return;
         }
@@ -422,6 +447,12 @@ export function createUI(callbacks) {
           dockPaintText(entry);
         }
       });
+      // 引擎重开本回合时会清空 trace（暂停后继续、刷新后接着下、截断后重来）：
+      // 那一次尝试留下的卡片跟着撤掉，别让放弃的尝试和新的尝试在日志里并列
+      const stale = dockState.entries.filter(
+        (entry) => entry.live && entry.side === side && entry.ply === moves.length && !live.has(entry.key),
+      );
+      stale.forEach(dockRemove);
     });
     if (added || nearBottom) dockBody.scrollTop = dockBody.scrollHeight;
   }
@@ -475,9 +506,11 @@ export function createUI(callbacks) {
         const moves = snap.moves || [];
         const key = `sys:${moves.length}:${result.reason}`;
         if (!dockState.map.has(key)) {
+          // 中断/超时这类没有 active 方，按输家一侧挂标签，别一律记在红方头上
+          const loser = result.winner === "r" ? "b" : result.winner === "b" ? "r" : null;
           dockPush(
             key,
-            snap.active || "r",
+            snap.active || loser || "r",
             {
               kind: "tool",
               title: "裁判",
@@ -567,7 +600,7 @@ export function createUI(callbacks) {
       document.querySelector(`#${side}-provider`).value = player.providerId || "";
       document.querySelector(`#${side}-model`).value = player.model || "";
       document.querySelector(`#${side}-context`).value = player.contextTokens ?? 128000;
-      document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? 38000;
+      document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? 8000;
     });
   }
 
@@ -581,7 +614,7 @@ export function createUI(callbacks) {
       providerId: document.querySelector(`#${prefix}-provider`).value,
       model: document.querySelector(`#${prefix}-model`).value.trim(),
       contextTokens: number(`#${prefix}-context`, 128000, 1024),
-      maxOutputTokens: number(`#${prefix}-maxout`, 38000, 256),
+      maxOutputTokens: number(`#${prefix}-maxout`, 8000, 256),
     });
     return {
       providers: collectProviders(),

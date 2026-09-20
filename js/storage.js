@@ -102,7 +102,6 @@ export function loadActive() {
 export function saveActive(match) {
   write(ACTIVE_KEY, match);
 }
-
 export function clearActive() {
   localStorage.removeItem(ACTIVE_KEY);
 }
@@ -113,8 +112,9 @@ export function loadMatches() {
 }
 
 export function saveMatch(match) {
-  const next = [match, ...loadMatches().filter((item) => item.id !== match.id)].slice(0, MATCH_LIMIT);
-  write(MATCHES_KEY, next);
+  let next = [match, ...loadMatches().filter((item) => item.id !== match.id)].slice(0, MATCH_LIMIT);
+  // 一局棋谱带着每手的推理轨迹，攒够 30 局能顶到 localStorage 配额：写不下就砍旧局重试
+  while (!write(MATCHES_KEY, next) && next.length > 1) next = next.slice(0, Math.ceil(next.length / 2));
   return next;
 }
 
@@ -133,5 +133,11 @@ function read(key, fallback) {
 }
 
 function write(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    // 配额满或隐私模式：写不进去也不能把对局打断（persist 发生在每手落子之后）
+    return false;
+  }
 }

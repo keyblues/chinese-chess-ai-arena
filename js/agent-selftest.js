@@ -167,7 +167,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   const outcome = await match.playTurn();
   assert.equal(outcome.kind, "move", "被 400 拒绝后仍要在原上限下把这一步走完");
   assert.deepEqual(caps(), [8000, 16000, 8000], "退回原上限重发，而不是一路抬高");
-  assert.match(match.traces.r.find((item) => item.id === "nudge-1").result, /硬顶/);
+  assert.match(match.traces.r.find((item) => item.id === "nudge-1").result, /压到 8k/);
 }
 
 // 8) DeepSeek 官方带 tools 时要求回传推理原文：先 400 一次，认出后整局都带上
@@ -188,6 +188,18 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.ok(echoed.length > 0);
   assert.equal(echoed.every((message) => typeof message.reasoning_content === "string"), true, "被拒之后所有 assistant 消息都带推理原文");
   assert.equal(match.echoReasoning, true);
+}
+
+// 9) 用户把输出上限配得比模型硬顶还大：往下压到厂商肯收的档位，不许把整局抛成"中断"
+{
+  const strict = (body) =>
+    body.max_tokens > 8192
+      ? httpError(400, "max_tokens is too large, maximum is 8192")
+      : toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
+  const { match, outcome } = await play([strict, strict], 200000);
+  assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
+  assert.deepEqual(caps(), [200000, 8192], "一次就要压到常见硬顶，别一步步折半烧步骤");
+  assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
 }
 
 console.log("agent loop ok");

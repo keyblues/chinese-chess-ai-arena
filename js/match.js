@@ -179,6 +179,13 @@ export class Match {
     this.clocks.r = Math.min(this.clocks.r, main);
     this.clocks.b = Math.min(this.clocks.b, main);
     this.traces = { r: saved?.traces?.r || [], b: saved?.traces?.b || [] };
+    // 每条 trace 属于哪一手：没有它，恢复对局后上一手的卡片会被当成新一手的卡片再画一遍。
+    // 老存档没记这个字段，按"上一手"算——persist 就发生在落子之后。
+    const lastPly = Math.max(0, this.records.length - 1);
+    this.tracePly = {
+      r: Number.isFinite(saved?.tracePly?.r) ? saved.tracePly.r : lastPly,
+      b: Number.isFinite(saved?.tracePly?.b) ? saved.tracePly.b : lastPly,
+    };
     this.phase = { r: "", b: "" };
     this.preview = null;
     this.lastMove = this.records[this.records.length - 1] || null;
@@ -215,6 +222,7 @@ export class Match {
       active: this.status === "finished" || this.status === "idle" ? null : this.pos.side,
       phase: { ...this.phase },
       traces: { r: this.traces.r, b: this.traces.b },
+      tracePly: { ...this.tracePly },
       moves: this.records,
       preview: this.preview,
       lastMove: this.lastMove,
@@ -296,6 +304,7 @@ export class Match {
         r: clipTrace(this.traces.r),
         b: clipTrace(this.traces.b),
       },
+      tracePly: { ...this.tracePly },
       result: this.result,
     };
   }
@@ -441,6 +450,7 @@ export class Match {
     const legalMap = new Map(legal.map((move) => [move.iccs, move]));
     // 本回合在棋谱里的序号（0 基）：日志条目带着它，回合之间就不会串位
     const turnPly = this.records.length;
+    this.tracePly[side] = turnPly;
     const baseCap = player.maxOutputTokens || 8000;
     let cap = Math.max(baseCap, this.capFloor[side] || 0);
     let hardCap = false; // 厂商拒过抬高后的上限：本回合不再抬
@@ -549,24 +559,30 @@ export class Match {
           },
         });
       } catch (error) {
-        // 抬高后的上限被厂商拒了（400）：退回基准上限重发，并把这家模型记为硬顶，本轮不再抬
-        if (cap > baseCap && capRejected(error)) {
-          hardCap = true;
-          cap = baseCap;
-          this.capFloor[side] = 0;
-          traceAdd(trace, {
-            id: `nudge-${step}`,
-            ply: turnPly,
-            kind: "tool",
-            title: "裁判",
-            body: "",
-            result: `输出上限抬到 ${Math.round((baseCap * 2) / 1000)}k 被厂商拒绝（该模型上限 ${Math.round(baseCap / 1000)}k 是硬顶）。退回原上限重发。`,
-            pending: false,
-            ok: false,
-          });
-          messages.push({ role: "user", content: "不要写分析，直接调用 commit_move 提交一步合法着法。" });
-          this.emit();
-          continue;
+        // 输出上限被厂商拒了（400）：本轮不再抬，压到厂商肯收的档位重发。
+        // 抬高被拒就退回已知可用的基准上限；基准上限本身被拒（用户配得比模型上限还大）就往下压，
+        // 不能让它一路抛成"中断"把整局终结掉。
+        if (capRejected(error)) {
+          const rejected = cap;
+          const next = cap > baseCap ? baseCap : cap > 8192 ? 8192 : Math.floor(cap / 2);
+          if (next >= 1024 && next < cap) {
+            hardCap = true;
+            cap = next;
+            this.capFloor[side] = 0;
+            traceAdd(trace, {
+              id: `nudge-${step}`,
+              ply: turnPly,
+              kind: "tool",
+              title: "裁判",
+              body: "",
+              result: `厂商拒绝了 ${Math.round(rejected / 1000)}k 的输出上限。压到 ${Math.round(cap / 1000)}k 重发。`,
+              pending: false,
+              ok: false,
+            });
+            messages.push({ role: "user", content: "不要写分析，直接调用 commit_move 提交一步合法着法。" });
+            this.emit();
+            continue;
+          }
         }
         // 该接口要求回传推理原文：开启后重发，本局后续都带着
         if (!this.echoReasoning && reasoningRejected(error)) {
@@ -792,8 +808,12 @@ export class Match {
   }
 }
 
+// 粗略估 token：中日韩字符约 1 token/字，其余按 2 字符/token（按 len/2 估中文会低估一倍，
+// 上下文预算就形同虚设）
 function estimateTokens(value) {
-  return Math.ceil(String(value ?? "").length / 2);
+  const text = String(value ?? "");
+  const wide = (text.match(/[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef]/g) || []).length;
+  return Math.ceil(wide + (text.length - wide) / 2);
 }
 
 function messagesTokens(messages) {

@@ -294,7 +294,7 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
             messages,
             tools,
             temperature,
-            max_tokens: maxTokens ?? 38000,
+            max_tokens: maxTokens ?? 8000,
             stream: true,
           }),
         },
