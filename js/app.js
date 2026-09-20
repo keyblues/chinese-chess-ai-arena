@@ -55,8 +55,9 @@ const ui = createUI({
 
 const hooks = {
   getSettings: () => settings,
-  onUpdate: () => {
-    if (!review) paint();
+  // 直接吃 snapshot：paint() 会再建一份快照，而流式期间这里每 80ms 就要走一次
+  onUpdate: (snap) => {
+    if (!review) ui.update(snap);
   },
   onClock: (clocks) => {
     if (!review) ui.setClocks(clocks);

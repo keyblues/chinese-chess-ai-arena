@@ -12,6 +12,7 @@ import {
   toFEN,
 } from "./engine.js";
 import { toNotation } from "./notation.js";
+import { dockRank } from "./ui.js";
 
 function iccsSet(pos) {
   return new Set(legalMoves(pos).map((move) => move.iccs));
@@ -139,3 +140,36 @@ assert.equal(played.board[2][4].type, "C");
 assert.equal(played.board[2][7], null);
 
 console.log(`engine ok, opening moves ${opening.size}`);
+
+// 行棋日志：条目按（回合, 步序, 类型）落位，最新的一条必须还在最下面。
+// 旧实现丢了 ply（恒为 0），新回合的第 0 步会被插到旧回合的第 1、2 步上面。
+const live = (ply, id) => ({ ply, item: { id } });
+const chronological = [
+  live(0, "think-0"), live(0, "say-0"), live(0, "tool-0-0"),
+  live(1, "think-0"), live(1, "tool-1-0"),
+  live(2, "think-0"), live(2, "tool-0-0"), live(2, "tool-1-0"),
+  live(3, "think-0"), live(3, "nudge-0"),
+];
+// 反序“到达”（最难的情况：工具结果晚到、后一回合先到），落位后仍必须是时间序
+const placed = [];
+for (const entry of [...chronological].reverse()) {
+  const rank = dockRank(entry.ply, entry.item);
+  const at = placed.findIndex((item) => item.rank > rank);
+  if (at < 0) placed.push({ rank, ...entry });
+  else placed.splice(at, 0, { rank, ...entry });
+}
+assert.deepEqual(
+  placed.map((entry) => `${entry.ply}:${entry.item.id}`),
+  chronological.map((entry) => `${entry.ply}:${entry.item.id}`),
+  "日志落位必须是时间序",
+);
+
+// 恢复历史对局时条目没有 id，用数组下标当步序，同样保持时序
+assert.ok(dockRank(0, { id: "" }, 3) > dockRank(0, { id: "" }, 2));
+assert.ok(dockRank(1, { id: "" }, 0) > dockRank(0, { id: "" }, 7));
+assert.ok(dockRank(0, { id: "tool-2-0" }) > dockRank(0, { id: "tool-1-0" }));
+assert.ok(dockRank(0, { id: "tool-0-0" }) > dockRank(0, { id: "say-0" }), "同一步：输出在工具卡之前");
+assert.ok(dockRank(0, { id: "nudge-0" }) > dockRank(0, { id: "tool-0-0" }), "裁判条目排在本步工具卡之后");
+assert.ok(dockRank(0, { id: "tool-0-1" }) > dockRank(0, { id: "tool-0-0" }), "同一步的多次工具调用按序号");
+assert.equal(dockRank(2, { id: "think-1" }), dockRank(2, { id: "think-1" }), "同一个条目反复渲染必须落同一位置");
+console.log("dock order ok");

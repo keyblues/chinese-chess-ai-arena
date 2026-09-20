@@ -113,6 +113,18 @@ function escapeText(value) {
     .replace(/>/g, "&gt;");
 }
 
+// 行棋日志的排序键：回合（ply）→ 步序（step）→ 条目类型（思维链/输出/工具/裁判）→ 同一步内的调用序号。
+// 条目一律按这个键插进 DOM，所以流式回调的到达顺序、晚到的工具结果都不会再打乱时序。
+const DOCK_KIND_ORDER = { think: 0, say: 1, tool: 2, nudge: 3 };
+
+export function dockRank(ply, item, stepFallback = 0) {
+  const match = String(item?.id || "").match(/^(think|say|tool|nudge)-(\d+)(?:-(\d+))?$/);
+  const step = match ? Number(match[2]) : stepFallback;
+  const kind = match ? DOCK_KIND_ORDER[match[1]] : DOCK_KIND_ORDER[item?.kind] ?? 2;
+  const sub = match?.[3] ? Math.min(Number(match[3]), 99) : 0;
+  return ply * 100000 + step * 1000 + kind * 100 + sub;
+}
+
 export function createUI(callbacks) {
   const board = document.querySelector("#board");
   const fit = document.querySelector("#board-fit");
@@ -121,7 +133,7 @@ export function createUI(callbacks) {
   board.innerHTML = `<div class="board-wood"></div>${boardSvg()}<div class="marks"></div><div class="pieces"></div>`;
   const marks = board.querySelector(".marks");
   const pieces = board.querySelector(".pieces");
-  const state = { fen: "", ply: -1, snap: null, timer: 0 };
+  const state = { fen: "", ply: -1, snap: null, timer: 0, movesStamp: "" };
 
   if (window.ResizeObserver) {
     new ResizeObserver(() => fitBoard()).observe(fit.parentElement);
@@ -233,6 +245,10 @@ export function createUI(callbacks) {
     const list = document.querySelector("#movelist");
     const moves = snap.moves || [];
     const focus = snap.focusPly ?? moves.length;
+    // 流式期间每个 token 都会走到这里：棋子数/焦点没变就不重建整条绸带
+    const stamp = `${snap.status}:${moves.length}:${focus}`;
+    if (state.movesStamp === stamp) return;
+    state.movesStamp = stamp;
     list.innerHTML = "";
     for (let i = 0; i < moves.length; i += 1) {
       const li = document.createElement("li");
@@ -323,7 +339,7 @@ export function createUI(callbacks) {
     if (resultEl) resultEl.textContent = entry.result || "";
   }
 
-  function dockPush(key, side, item, turn) {
+  function dockPush(key, side, item, ply, stepFallback = 0) {
     const body = String(item.body || "");
     const entry = {
       key,
@@ -334,7 +350,8 @@ export function createUI(callbacks) {
       result: String(item.result || ""),
       ok: item.ok,
       pending: item.pending,
-      turn: `第${turn}回合`,
+      turn: `第${Math.floor(ply / 2) + 1}回合`,
+      rank: dockRank(ply, item, stepFallback),
       long: body.length > 220 || String(item.result || "").length > 160,
       open: false,
       el: null,
@@ -343,6 +360,7 @@ export function createUI(callbacks) {
     dockPaintText(entry);
     dockState.entries.push(entry);
     dockState.map.set(key, entry);
+    dockPlace(entry);
     while (dockState.entries.length > 240) {
       const old = dockState.entries.shift();
       old.el.remove();
@@ -350,31 +368,46 @@ export function createUI(callbacks) {
     }
   }
 
+  // 新条目按排序键落位：晚到的工具结果、后一回合的条目都不会再插到旧条目上面
+  function dockPlace(entry) {
+    for (const child of dockBody.children) {
+      if (child === entry.el) continue;
+      const other = dockState.map.get(child.dataset.key);
+      if (other && other.rank > entry.rank) {
+        dockBody.insertBefore(entry.el, child);
+        return;
+      }
+    }
+  }
+
   function dockSync(snap) {
     if (snap.review) return; // 回看是历史回放，不进实时日志
+    const moves = snap.moves || [];
     if (!dockState.seeded) {
       dockState.seeded = true;
-      const moves = snap.moves || [];
+      const from = Math.max(0, moves.length - 6);
       moves.slice(-6).forEach((record, offset) => {
-        const ply = moves.length - moves.slice(-6).length + offset + 1;
+        const ply = from + offset;
         (record.trace || []).forEach((item, idx) => {
           if ((item.kind === "say" || item.kind === "think") && !String(item.body || "").trim()) return;
-          dockPush(`${record.side}:${ply}:${idx}`, record.side, { ...item, pending: false }, Math.floor((ply - 1) / 2) + 1);
+          dockPush(`${record.side}:${ply}:${idx}`, record.side, { ...item, pending: false }, ply, idx);
         });
       });
     }
     const nearBottom = dockBody.scrollTop + dockBody.clientHeight >= dockBody.scrollHeight - 80;
     let added = false;
-    const round = Math.floor((snap.moves?.length || 0) / 2) + 1;
-    document.querySelector("#dock-round").textContent = snap.moves?.length ? `第 ${round} 回合` : "";
+    const round = Math.floor(moves.length / 2) + 1;
+    document.querySelector("#dock-round").textContent = moves.length ? `第 ${round} 回合` : "";
     ["b", "r"].forEach((side) => {
       (snap.traces?.[side] || []).forEach((item, idx) => {
         // 空白"输出/思维链"（模型只吐了空格）不建卡，等有内容再入列
         if ((item.kind === "say" || item.kind === "think") && !String(item.body || "").trim()) return;
-        const key = `${side}:${snap.moves?.length || 0}:${item.id || idx}`;
+        // 键里带条目自己的回合号（item.ply），落子后同一个条目不会被当成新条目重复入列
+        const ply = Number.isFinite(item.ply) ? item.ply : moves.length;
+        const key = `${side}:${ply}:${item.id || idx}`;
         const entry = dockState.map.get(key);
         if (!entry) {
-          dockPush(key, side, item, round);
+          dockPush(key, side, item, ply, idx);
           added = true;
           return;
         }
@@ -439,7 +472,8 @@ export function createUI(callbacks) {
     } else {
       banner.hidden = true;
       if (snap.status === "finished" && result) {
-        const key = `sys:${snap.moves?.length || 0}:${result.reason}`;
+        const moves = snap.moves || [];
+        const key = `sys:${moves.length}:${result.reason}`;
         if (!dockState.map.has(key)) {
           dockPush(
             key,
@@ -452,7 +486,8 @@ export function createUI(callbacks) {
               ok: false,
               pending: false,
             },
-            Math.floor((snap.moves?.length || 0) / 2) + 1,
+            moves.length,
+            99,
           );
           toast(result.detail ? `${result.reason}：${result.detail}` : result.reason);
         }

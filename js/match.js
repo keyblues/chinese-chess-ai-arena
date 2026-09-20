@@ -18,6 +18,32 @@ import { clip } from "./storage.js";
 const MAX_STEPS = 8;
 const MAX_FAILURES = 3;
 const DRAW_PLIES = 120;
+// 输出被上限截断时不带半截文本重发，只抬高输出上限；连续截断超过这个次数就交给裁判代走
+const MAX_TRUNCATIONS = 2;
+const TRUNCATION_TOKEN_CAP = 64000;
+
+const TRACE_KIND_ORDER = { think: 0, say: 1, tool: 2, nudge: 3 };
+
+// 同一回合内的条目按（步序，类型）排出确定次序：流式回调的到达顺序不影响棋谱时序
+function traceOrder(entry) {
+  const match = String(entry?.id || "").match(/^(think|say|tool|nudge)-(\d+)(?:-(\d+))?$/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const sub = match[3] ? Number(match[3]) : 0;
+  return Number(match[2]) * 1000 + TRACE_KIND_ORDER[match[1]] * 100 + sub;
+}
+
+function traceAdd(trace, entry) {
+  const order = traceOrder(entry);
+  let at = trace.length;
+  for (let i = 0; i < trace.length; i += 1) {
+    if (traceOrder(trace[i]) > order) {
+      at = i;
+      break;
+    }
+  }
+  trace.splice(at, 0, entry);
+  return entry;
+}
 
 function systemPrompt(side) {
   const name = sideName(side);
@@ -53,6 +79,13 @@ function parseArgs(text) {
   } catch {
     return null;
   }
+}
+
+// 有些厂商/模型的输出上限是硬顶（例如 deepseek-chat 只收 8k）：把上限抬上去会被 400 直接拒掉。
+// 这不是模型的问题，认出来退回原上限接着下，别让整局因为一次抬高而中断。
+function capRejected(error) {
+  const text = String(error?.message || "");
+  return /HTTP 4\d\d/.test(text) && /max_?tokens|max_completion_tokens|max(imum)? output/i.test(text);
 }
 
 function repetition(records, positions) {
@@ -151,6 +184,9 @@ export class Match {
     this.resumeWait = null;
     this.running = false;
     this.timer = 0;
+    this.emitTimer = 0;
+    // 被截断过的模型不用每回合重新学一遍：把抬高过的输出上限记在手上，下回合直接从这里起步
+    this.capFloor = { r: 0, b: 0 };
   }
 
   providerOf(side) {
@@ -179,7 +215,20 @@ export class Match {
   }
 
   emit() {
+    if (this.emitTimer) {
+      clearTimeout(this.emitTimer);
+      this.emitTimer = 0;
+    }
     this.hooks.onUpdate(this.snapshot());
+  }
+
+  // 流式期间每个 token 都重绘会把主线程占满（回合一多就是越下越卡），合并成约每 80ms 一次
+  scheduleEmit() {
+    if (this.emitTimer) return;
+    this.emitTimer = setTimeout(() => {
+      this.emitTimer = 0;
+      this.emit();
+    }, 80);
   }
 
   remaining(side) {
@@ -381,6 +430,11 @@ export class Match {
     const player = this.players[side];
     const legal = legalMoves(this.pos);
     const legalMap = new Map(legal.map((move) => [move.iccs, move]));
+    // 本回合在棋谱里的序号（0 基）：日志条目带着它，回合之间就不会串位
+    const turnPly = this.records.length;
+    const baseCap = player.maxOutputTokens || 8000;
+    let cap = Math.max(baseCap, this.capFloor[side] || 0);
+    let hardCap = false; // 厂商拒过抬高后的上限：本回合不再抬
     this.traces[side] = [];
     this.preview = null;
     this.phase[side] = "请求中";
@@ -397,6 +451,47 @@ export class Match {
       },
     ];
     let failures = 0;
+    let truncations = 0;
+
+    // 输出被上限截断不是模型违规，也不是策略问题：半截文本/半截参数一律不回灌历史
+    // （只会让下一次请求更长更慢、更像在自我重复），直接把输出上限翻倍重发一次。
+    // 返回 null 表示已重发，返回对象表示该用裁判代走收场。
+    const truncationRetry = (step, trace) => {
+      truncations += 1;
+      const givingUp = truncations > MAX_TRUNCATIONS;
+      if (!hardCap) {
+        cap = Math.min(cap * 2, TRUNCATION_TOKEN_CAP);
+        this.capFloor[side] = cap;
+      }
+      traceAdd(trace, {
+        id: `nudge-${step}`,
+        ply: turnPly,
+        kind: "tool",
+        title: "裁判",
+        body: "",
+        result: givingUp
+          ? `分析过长被截断未落子（第 ${truncations} 次）。连续被截断，裁判代走。`
+          : hardCap
+            ? `分析过长被截断未落子（第 ${truncations} 次）。该模型输出上限 ${Math.round(cap / 1000)}k 是硬顶，只能催它直接落子。`
+            : `分析过长被截断未落子（第 ${truncations} 次）。已放宽输出上限到 ${Math.round(cap / 1000)}k 并催促直接落子。`,
+        pending: false,
+        ok: false,
+      });
+      if (givingUp) {
+        this.phase[side] = "输出连续被截断";
+        this.emit();
+        return { kind: "random", reason: "输出连续被截断，裁判代走" };
+      }
+      this.phase[side] = hardCap
+        ? `重试 · 输出被截断（上限 ${Math.round(cap / 1000)}k 硬顶）`
+        : `重试 · 输出超长被截断（上限 ${Math.round(cap / 1000)}k）`;
+      messages.push({
+        role: "user",
+        content: "你上一轮在输出上限处被截断，没有提交着法，那次输出已作废。不要再写分析，直接调用 commit_move 提交一步合法着法。",
+      });
+      this.emit();
+      return null;
+    };
 
     for (let step = 0; step < MAX_STEPS; step += 1) {
       if (this.remaining(side) <= 0) {
@@ -405,8 +500,8 @@ export class Match {
       }
       this.controller = new AbortController();
       const trace = this.traces[side];
-      const think = { id: `think-${step}`, kind: "think", title: "思维链", body: "" };
-      const say = { id: `say-${step}`, kind: "say", title: "输出", body: "" };
+      const think = { id: `think-${step}`, ply: turnPly, kind: "think", title: "思维链", body: "" };
+      const say = { id: `say-${step}`, ply: turnPly, kind: "say", title: "输出", body: "" };
       let acc;
       try {
         this.phase[side] = failures ? `重试 ${failures}/${MAX_FAILURES}` : "思考中";
@@ -418,23 +513,22 @@ export class Match {
           messages: trimMessages(messages, player.contextTokens),
           tools: TOOLS,
           temperature: this.temperature,
-          maxTokens: player.maxOutputTokens,
+          maxTokens: cap,
           signal: this.controller.signal,
           onDelta: (delta) => {
             if (delta.reasoning) {
+              if (!think.body) traceAdd(trace, think);
               think.body = delta.reasoning;
-              if (!trace.includes(think)) trace.push(think);
             }
             if (delta.content) {
+              if (!say.body) traceAdd(trace, say);
               say.body = delta.content;
-              if (!trace.includes(say)) trace.push(say);
             }
             delta.toolCalls.forEach((call, index) => {
               const id = `tool-${step}-${call.index ?? index}`;
               let item = trace.find((entry) => entry.id === id);
               if (!item) {
-                item = { id, kind: "tool", title: "工具", body: "", result: "", pending: true, ok: true };
-                trace.push(item);
+                item = traceAdd(trace, { id, ply: turnPly, kind: "tool", title: "工具", body: "", result: "", pending: true, ok: true });
               }
               item.title = call.name || "工具";
               item.body = call.arguments;
@@ -442,9 +536,30 @@ export class Match {
               if (preview) this.preview = preview;
             });
             this.phase[side] = delta.toolCalls.some((call) => call.name) ? "调用工具" : "思考中";
-            this.emit();
+            this.scheduleEmit();
           },
         });
+      } catch (error) {
+        // 抬高后的上限被厂商拒了（400）：退回基准上限重发，并把这家模型记为硬顶，本轮不再抬
+        if (cap > baseCap && capRejected(error)) {
+          hardCap = true;
+          cap = baseCap;
+          this.capFloor[side] = 0;
+          traceAdd(trace, {
+            id: `nudge-${step}`,
+            ply: turnPly,
+            kind: "tool",
+            title: "裁判",
+            body: "",
+            result: `输出上限抬到 ${Math.round((baseCap * 2) / 1000)}k 被厂商拒绝（该模型上限 ${Math.round(baseCap / 1000)}k 是硬顶）。退回原上限重发。`,
+            pending: false,
+            ok: false,
+          });
+          messages.push({ role: "user", content: "不要写分析，直接调用 commit_move 提交一步合法着法。" });
+          this.emit();
+          continue;
+        }
+        throw error;
       } finally {
         this.controller = null;
       }
@@ -454,29 +569,22 @@ export class Match {
         id: call.id || `call_${step}_${index}`,
       }));
       if (!calls.length) {
-        const truncated = acc.finishReason === "length";
+        if (acc.finishReason === "length") {
+          const stop = truncationRetry(step, trace);
+          if (stop) return stop;
+          continue;
+        }
         messages.push({ role: "assistant", content: acc.content || "（没有调用工具）" });
-        trace.push({
+        traceAdd(trace, {
           id: `nudge-${step}`,
+          ply: turnPly,
           kind: "tool",
           title: "裁判",
           body: "",
-          result: truncated
-            ? "分析过长被截断未落子。直接调用 commit_move 提交一步。"
-            : "没有工具调用。请调用 legal_moves，再调用 commit_move。",
+          result: "没有工具调用。请调用 legal_moves，再调用 commit_move。",
           pending: false,
           ok: false,
         });
-        if (truncated) {
-          // 截断是模型能力限制，不计违规次数，直接催促重试
-          this.phase[side] = "重试 · 输出超长被截断";
-          messages.push({
-            role: "user",
-            content: "你上一轮分析过长被截断未落子。不要再写长分析，直接调用 commit_move 提交一步合法着法。",
-          });
-          this.emit();
-          continue;
-        }
         failures += 1;
         this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · 未调用工具`;
         if (failures >= MAX_FAILURES) {
@@ -491,6 +599,13 @@ export class Match {
         continue;
       }
 
+      // 工具调用被上限掐在半截 JSON 上时，同上：不算违规，抬高上限重发
+      if (acc.finishReason === "length" && calls.every((call) => parseArgs(call.arguments) === null)) {
+        const stop = truncationRetry(step, trace);
+        if (stop) return stop;
+        continue;
+      }
+
       const assistant = {
         role: "assistant",
         content: acc.content || "",
@@ -500,7 +615,7 @@ export class Match {
           function: { name: call.name, arguments: call.arguments || "{}" },
         })),
       };
-      if (acc.reasoning) assistant.reasoning_content = acc.reasoning;
+      // 推理原文不回传历史：DeepSeek 官方建议不传，且越长的上下文只会让下一手越慢
       messages.push(assistant);
 
       let finished = null;
@@ -509,8 +624,7 @@ export class Match {
         const id = `tool-${step}-${call.index ?? 0}`;
         let item = trace.find((entry) => entry.id === id);
         if (!item) {
-          item = { id, kind: "tool", title: call.name, body: call.arguments, pending: false, ok: true, result: "" };
-          trace.push(item);
+          item = traceAdd(trace, { id, ply: turnPly, kind: "tool", title: "工具", body: "", result: "", pending: false, ok: true });
         }
         item.title = call.name;
         item.body = call.arguments || "";
@@ -530,7 +644,7 @@ export class Match {
         if (failures >= MAX_FAILURES) return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
       }
       if (finished) return finished;
-      if (step >= 3) {
+      if (step >= 2) {
         messages.push({ role: "user", content: "信息已经足够。请立刻调用 commit_move 或 resign，不要再重复查询。" });
       }
     }
