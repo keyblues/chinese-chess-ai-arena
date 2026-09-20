@@ -4,6 +4,7 @@
 
 - 在线地址：`https://keyblues.github.io/chinese-chess-ai-arena/`
 - 使用方式：打开页面 → 设置里填入厂商 Base URL、API Key、红黑双方的模型 ID → 开局。
+- 每方可设"思考强度"（不思考／低／中／高，默认不思考）：按厂商方言发送（OpenRouter 用 `reasoning`、智谱与 Kimi 用 `thinking`、SiliconFlow 用 `enable_thinking`），认不出的厂商不发该参数，被厂商拒绝时自动退回不带参数重试。推理 token 计入输出上限，所以"不思考"能明显减少"分析过长被截断未落子"。
 - API Key 只保存在你自己浏览器的 localStorage 里，只会发给你填的那个厂商，不经过任何第三方。
 
 ## 厂商直连支持（浏览器 CORS）

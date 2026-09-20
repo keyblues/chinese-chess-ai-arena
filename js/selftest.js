@@ -225,6 +225,7 @@ console.log("storage ok");
   assert.equal(settings.red.providerId, "pA", "对不上的 providerId 要修到第一个供应商");
   assert.equal(settings.black.providerId, "pB", "对得上的不许动");
   assert.equal(settings.red.model, "m1", "修复不能顺手把别的字段改掉");
+  assert.equal(settings.red.thinking, "off", "老存档没有 thinking 字段时默认不思考");
   assert.ok(settings.providers.some((provider) => provider.id === settings.red.providerId));
 }
 console.log("settings ok");

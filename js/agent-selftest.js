@@ -53,11 +53,11 @@ globalThis.fetch = async (_url, options) => {
   return typeof next === "function" ? next(body) : next;
 };
 
-function makeMatch(maxOutputTokens = 8000) {
-  const player = (name) => ({ name, providerId: "p", model: "stub-model", contextTokens: 128000, maxOutputTokens });
+function makeMatch(maxOutputTokens = 8000, baseUrl = "https://stub.test/v1", thinking = "off") {
+  const player = (name) => ({ name, providerId: "p", model: "stub-model", thinking, contextTokens: 128000, maxOutputTokens });
   return new Match({
     settings: {
-      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      providers: [{ id: "p", name: "stub", baseUrl, apiKey: "k" }],
       temperature: 0.4,
       mainMinutes: 60,
       incrementSeconds: 60,
@@ -68,10 +68,10 @@ function makeMatch(maxOutputTokens = 8000) {
   });
 }
 
-async function play(scripted, maxOutputTokens) {
+async function play(scripted, maxOutputTokens, baseUrl, thinking) {
   script = scripted;
   requests = [];
-  const match = makeMatch(maxOutputTokens);
+  const match = makeMatch(maxOutputTokens, baseUrl, thinking);
   const outcome = await match.playTurn();
   return { match, outcome };
 }
@@ -200,6 +200,45 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
   assert.deepEqual(caps(), [200000, 8192], "一次就要压到常见硬顶，别一步步折半烧步骤");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
+}
+
+// 10) 思考强度：按厂商方言发送，默认不思考；厂商不认就整局退回不带该参数
+{
+  const play3 = () => play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000);
+  const openrouter = (thinking) => play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://openrouter.ai/api/v1", thinking);
+
+  const { outcome } = await play3();
+  assert.equal(outcome.kind, "move");
+  assert.equal("reasoning" in requests[0], false, "认不出的厂商一个多余字段都不发");
+
+  const { outcome: off } = await openrouter("off");
+  assert.equal(off.kind, "move");
+  assert.deepEqual(requests[0].reasoning, { enabled: false }, "默认不思考要明确关掉推理");
+
+  const { outcome: high } = await openrouter("high");
+  assert.equal(high.kind, "move");
+  assert.deepEqual(requests[0].reasoning, { effort: "high" }, "思考强度要按档位发");
+
+  const { outcome: zhipu } = await play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://open.bigmodel.cn/api/paas/v4", "off");
+  assert.equal(zhipu.kind, "move");
+  assert.deepEqual(requests[0].thinking, { type: "disabled" }, "智谱用 thinking 字段");
+
+  const { outcome: plain } = await play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://api.deepseek.com", "high");
+  assert.equal(plain.kind, "move");
+  assert.equal("reasoning" in requests[0] || "thinking" in requests[0] || "enable_thinking" in requests[0], false);
+}
+
+// 11) 厂商 400 拒绝思考强度字段：整局退回不带该参数，仍然把这步走完
+{
+  const strict = (body) =>
+    "reasoning" in body
+      ? httpError(400, 'Invalid parameter: "reasoning" is not supported by this model')
+      : toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
+  const { match, outcome } = await play([strict, strict], 8000, "https://openrouter.ai/api/v1", "off");
+  assert.equal(outcome.kind, "move", "被拒之后要把这一步走完");
+  assert.equal("reasoning" in requests[0], true);
+  assert.equal("reasoning" in requests[1], false, "退回时不带思考强度参数");
+  assert.equal(match.dropThinking, true);
 }
 
 console.log("agent loop ok");

@@ -17,6 +17,8 @@ function makePlayer(name, providerId, model) {
     name,
     providerId,
     model,
+    // 默认不思考：推理 token 计入输出上限，思考型模型很容易把一整手的输出烧在推理里
+    thinking: "off",
     contextTokens: 128000,
     maxOutputTokens: 8000,
   };
@@ -42,10 +44,14 @@ function normalizeProvider(data) {
   };
 }
 
+const THINKING_LEVELS = ["off", "low", "medium", "high"];
+
 function normalizePlayer(saved, fallback) {
+  const thinking = THINKING_LEVELS.includes(saved?.thinking) ? saved.thinking : fallback.thinking || "off";
   return {
     ...fallback,
     ...(saved || {}),
+    thinking,
     contextTokens: Number(saved?.contextTokens) > 0 ? Number(saved.contextTokens) : 128000,
     maxOutputTokens: Number(saved?.maxOutputTokens) > 0 ? Number(saved.maxOutputTokens) : 8000,
   };

@@ -52,6 +52,27 @@ function rootUrl(baseUrl) {
   return String(baseUrl || "").replace(/\/$/, "");
 }
 
+// 思考强度：各家开关字段不同，按厂商地址挑方言；认不出的厂商一律不发，
+// 免得未知字段被 400 拒掉（真被拒了也有兜底：match 会退回不带该参数重发）。
+export function thinkingParams(baseUrl, thinking) {
+  if (!thinking) return null;
+  const level = ["off", "low", "medium", "high"].includes(thinking) ? thinking : "off";
+  const host = String(baseUrl || "").toLowerCase();
+  if (host.includes("openrouter.ai")) {
+    return level === "off" ? { reasoning: { enabled: false } } : { reasoning: { effort: level } };
+  }
+  if (host.includes("bigmodel.cn") || host.includes("zhipu")) {
+    return { thinking: { type: level === "off" ? "disabled" : "enabled" } };
+  }
+  if (host.includes("siliconflow.cn") || host.includes("dashscope") || host.includes("aliyuncs.com")) {
+    return { enable_thinking: level !== "off" };
+  }
+  if (host.includes("moonshot.cn")) {
+    return { thinking: { type: level === "off" ? "disabled" : "enabled" } };
+  }
+  return null;
+}
+
 const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 function wait(ms) {
@@ -258,7 +279,7 @@ function abortError() {
 // 单次请求 = 看门狗保护下的完整对话。看门狗只认“有意义的 data 行”：
 // 上游的注释行/keep-alive 空包不喂计时器，假死 100 秒即掐断；
 // 数据仍在流动的长推理不设上限——真正的预算是对局时钟。
-async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta }) {
+async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, thinking, signal, onDelta }) {
   const watchdog = new AbortController();
   let reason = null;
   let lastDataAt = Date.now();
@@ -296,6 +317,7 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
             temperature,
             max_tokens: maxTokens ?? 8000,
             stream: true,
+            ...(thinkingParams(baseUrl, thinking) || {}),
           }),
         },
         3,

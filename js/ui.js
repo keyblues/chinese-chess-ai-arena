@@ -604,6 +604,7 @@ export function createUI(callbacks) {
       document.querySelector(`#${side}-name`).value = player.name || "";
       document.querySelector(`#${side}-provider`).value = player.providerId || "";
       document.querySelector(`#${side}-model`).value = player.model || "";
+      document.querySelector(`#${side}-thinking`).value = player.thinking || "off";
       document.querySelector(`#${side}-context`).value = player.contextTokens ?? 128000;
       document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? 8000;
     });
@@ -618,6 +619,7 @@ export function createUI(callbacks) {
       name: document.querySelector(`#${prefix}-name`).value.trim() || fallbackName,
       providerId: document.querySelector(`#${prefix}-provider`).value,
       model: document.querySelector(`#${prefix}-model`).value.trim(),
+      thinking: document.querySelector(`#${prefix}-thinking`).value || "off",
       contextTokens: number(`#${prefix}-context`, 128000, 1024),
       maxOutputTokens: number(`#${prefix}-maxout`, 8000, 256),
     });

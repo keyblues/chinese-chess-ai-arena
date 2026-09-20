@@ -92,7 +92,13 @@ function capRejected(error) {
 // 默认不回传（越长的历史越慢），被拒一次之后整局都带上。
 function reasoningRejected(error) {
   const text = String(error?.message || "");
-  return /HTTP 4\d\d/.test(text) && /reasoning/i.test(text);
+  return /HTTP 4\d\d/.test(text) && /reasoning_content/i.test(text);
+}
+
+// 厂商不认思考强度那个字段（各家叫法不一）：整局不再发，别让一次 400 把对局打断
+function thinkingRejected(error) {
+  const text = String(error?.message || "");
+  return /HTTP 4\d\d/.test(text) && /reasoning|thinking|enable_thinking/i.test(text) && !/reasoning_content/i.test(text);
 }
 
 function repetition(records, positions) {
@@ -147,11 +153,11 @@ function replay(moves) {
 
 function shapePlayer(raw, fallback) {
   const source = raw || {};
-  const base = source.providerId ? source : fallback;
   return {
     name: source.name || fallback.name,
     providerId: source.providerId || fallback.providerId,
     model: source.model || fallback.model,
+    thinking: source.thinking || fallback.thinking || "off",
     contextTokens: Number(source.contextTokens) > 0 ? Number(source.contextTokens) : fallback.contextTokens,
     maxOutputTokens: Number(source.maxOutputTokens) > 0 ? Number(source.maxOutputTokens) : fallback.maxOutputTokens,
   };
@@ -203,6 +209,8 @@ export class Match {
     this.capFloor = { r: 0, b: 0 };
     // 该接口是否要求把推理原文回传（DeepSeek 官方带 tools 时要求），见 reasoningRejected
     this.echoReasoning = false;
+    // 厂商不认思考强度字段时整局不再发，见 thinkingRejected
+    this.dropThinking = false;
   }
 
   providerOf(side) {
@@ -533,6 +541,7 @@ export class Match {
           tools: TOOLS,
           temperature: this.temperature,
           maxTokens: cap,
+          thinking: this.dropThinking ? null : player.thinking,
           signal: this.controller.signal,
           onDelta: (delta) => {
             if (delta.reasoning) {
@@ -594,6 +603,22 @@ export class Match {
             title: "裁判",
             body: "",
             result: "该接口要求把推理原文回传给模型（DeepSeek 官方带 tools 时如此）。已开启后重发。",
+            pending: false,
+            ok: false,
+          });
+          this.emit();
+          continue;
+        }
+        // 这家厂商不认思考强度字段：整局不再发这个参数，重发当前这一步
+        if (!this.dropThinking && thinkingRejected(error)) {
+          this.dropThinking = true;
+          traceAdd(trace, {
+            id: `nudge-${step}`,
+            ply: turnPly,
+            kind: "tool",
+            title: "裁判",
+            body: "",
+            result: "该厂商不接受思考强度参数，本局不再发送（思考强度设置对这家无效）。",
             pending: false,
             ok: false,
           });
