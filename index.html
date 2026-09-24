@@ -86,9 +86,14 @@
 
   <dialog id="settings">
     <form class="sheet" id="settings-form">
-      <h3>对局设置</h3>
-      <p class="hint">供应商档案和密钥只写进这台浏览器的 localStorage，不会进源码。红黑双方可选用不同供应商和模型；落子必须走工具调用，裁判不接受口头着法。思考强度默认"不思考"（推理 token 也算输出，思考型模型很容易把一整手的输出烧在推理里）；厂商不认这个参数时会自动跳过。</p>
-      <div class="grid">
+      <div class="sheet-head">
+        <h3>对局设置</h3>
+        <span class="dirty-badge" id="settings-dirty" hidden>未保存</span>
+      </div>
+      <p class="hint">供应商与 API Key 只保存在本机浏览器 localStorage。红黑可选用不同供应商；落子须走工具调用。点「保存」写入本地；「取消」丢弃未保存修改。开局只用已保存的设置。</p>
+
+      <h4 class="section-title">对局规则</h4>
+      <div class="grid rules-grid">
         <label>温度
           <input id="temperature" name="temperature" type="number" min="0" max="1.5" step="0.1" />
         </label>
@@ -99,40 +104,52 @@
           <input id="increment" name="incrementSeconds" type="number" min="0" max="60" step="1" />
         </label>
       </div>
+
       <h4 class="section-title">供应商</h4>
+      <p class="field-hint">接口地址须为 OpenAI 兼容的 <code>/v1</code> 根路径。非 HTTPS 会提示风险（本机 localhost 除外）。</p>
       <div id="provider-rows"></div>
       <button class="ghost-btn" id="btn-add-provider" type="button">＋ 添加供应商</button>
+
+      <h4 class="section-title">红黑双方</h4>
       <div class="sides">
-        <div class="side-box">
+        <div class="side-box" data-side="red">
           <h4>红方</h4>
           <label>名称<input id="red-name" /></label>
           <label>供应商<select id="red-provider"></select></label>
-          <label>模型<input id="red-model" list="red-model-list" /></label>
-          <label>思考强度<select id="red-thinking">
-            <option value="off">不思考</option>
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-          </select></label>
+          <label>模型<input id="red-model" list="red-model-list" placeholder="填写模型 ID" /></label>
+          <label>思考强度
+            <select id="red-thinking"></select>
+            <span class="field-hint" id="red-thinking-hint"></span>
+          </label>
           <div class="pair">
-            <label>上下文<input id="red-context" type="number" min="1024" /></label>
-            <label>最大输出<input id="red-maxout" type="number" min="256" /></label>
+            <label>上下文（token）
+              <input id="red-context" type="number" min="1024" placeholder="131072" />
+              <span class="field-hint">默认 128k；历史约占用 80% 窗口时压缩</span>
+            </label>
+            <label>最大输出（token）
+              <input id="red-maxout" type="number" min="256" placeholder="32768" />
+              <span class="field-hint">默认 32k；压缩阈值还会为输出留出空间</span>
+            </label>
           </div>
         </div>
-        <div class="side-box">
+        <div class="side-box" data-side="black">
           <h4>黑方</h4>
           <label>名称<input id="black-name" /></label>
           <label>供应商<select id="black-provider"></select></label>
-          <label>模型<input id="black-model" list="black-model-list" /></label>
-          <label>思考强度<select id="black-thinking">
-            <option value="off">不思考</option>
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-          </select></label>
+          <label>模型<input id="black-model" list="black-model-list" placeholder="填写模型 ID" /></label>
+          <label>思考强度
+            <select id="black-thinking"></select>
+            <span class="field-hint" id="black-thinking-hint"></span>
+          </label>
           <div class="pair">
-            <label>上下文<input id="black-context" type="number" min="1024" /></label>
-            <label>最大输出<input id="black-maxout" type="number" min="256" /></label>
+            <label>上下文（token）
+              <input id="black-context" type="number" min="1024" placeholder="131072" />
+              <span class="field-hint">默认 128k；历史约占用 80% 窗口时压缩</span>
+            </label>
+            <label>最大输出（token）
+              <input id="black-maxout" type="number" min="256" placeholder="32768" />
+              <span class="field-hint">默认 32k；压缩阈值还会为输出留出空间</span>
+            </label>
           </div>
         </div>
       </div>
@@ -141,7 +158,7 @@
       <p class="test-result" id="test-result"></p>
       <div class="sheet-actions">
         <button class="ghost-btn" id="btn-test" type="button">测试连接</button>
-        <button class="ghost-btn" id="btn-close-settings" type="button">关闭</button>
+        <button class="ghost-btn" id="btn-close-settings" type="button">取消</button>
         <button class="solid-btn" type="submit">保存</button>
       </div>
     </form>

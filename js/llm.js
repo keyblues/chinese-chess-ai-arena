@@ -428,17 +428,24 @@ export async function testConnection({ baseUrl, apiKey, model, signal }) {
     }
   } catch (error) {
     if (error?.name === "AbortError") throw error;
-    const wrapped = formatFetchError(error);
-    if (wrapped.message.includes("跨域")) throw wrapped;
+    // /models 失败（含跨域）时改走对话探测；先检查模型 ID，避免误报成跨域
   }
-  const acc = await streamChat({
-    baseUrl,
-    apiKey,
-    model: model || "Qwen/Qwen3.8-27B",
-    messages: [{ role: "user", content: "回复一个字：好" }],
-    temperature: 0,
-    maxTokens: 32,
-    signal,
-  });
-  return { ok: true, message: acc.content ? "对话接口可用" : "接口有响应", models: [] };
+  if (!String(model || "").trim()) {
+    throw new Error("请先填写模型 ID，再测试连接");
+  }
+  try {
+    const acc = await streamChat({
+      baseUrl,
+      apiKey,
+      model: String(model).trim(),
+      messages: [{ role: "user", content: "回复一个字：好" }],
+      temperature: 0,
+      maxTokens: 32,
+      signal,
+    });
+    return { ok: true, message: acc.content ? "对话接口可用" : "接口有响应", models: [] };
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw formatFetchError(error);
+  }
 }

@@ -13,10 +13,10 @@ const ui = createUI({
   onStart: startMatch,
   onPause: togglePause,
   onStop: () => match?.stop(),
+  getSavedSettings: () => settings,
   onSave: (next) => {
     settings = next;
     saveSettings(settings);
-    ui.toast("设置已保存在这台浏览器");
     paint();
   },
   onTest: testApi,
@@ -63,6 +63,10 @@ const hooks = {
     if (!review) ui.setClocks(clocks);
   },
   onPersist: (data) => saveActive(data),
+  onNeedSettings: (message) => {
+    ui.toast(message);
+    ui.openSettings();
+  },
   onFinish: (data) => {
     clearActive();
     history = saveMatch(data);
@@ -162,8 +166,12 @@ function providerById(providers, id) {
 }
 
 function startMatch() {
-  settings = ui.readSettings();
-  saveSettings(settings);
+  if (ui.isSettingsDirty?.()) {
+    ui.toast("设置里有未保存的修改，请先保存或取消");
+    ui.openSettings();
+    return;
+  }
+  // 开局只用已保存的设置，不把对话框草稿悄悄落盘
   const redProvider = providerById(settings.providers, settings.red.providerId);
   const blackProvider = providerById(settings.providers, settings.black.providerId);
   if (!redProvider || !blackProvider) {

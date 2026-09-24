@@ -456,7 +456,7 @@ export class Match {
 
   providerOf(side) {
     const id = this.players[side]?.providerId;
-    return this.providers.find((provider) => provider.id === id) || this.providers[0] || { baseUrl: "", apiKey: "" };
+    return this.providers.find((provider) => provider.id === id) || null;
   }
 
   snapshot() {
@@ -643,6 +643,14 @@ export class Match {
           this.finish(before);
           return;
         }
+        const provider = this.providerOf(this.pos.side);
+        if (!provider?.baseUrl || !provider?.apiKey) {
+          this.pause();
+          this.hooks.onNeedSettings?.(
+            `${this.pos.side === "r" ? "红方" : "黑方"}供应商已失效或缺少密钥，请在设置里重新选择后再继续`,
+          );
+          continue;
+        }
         let outcome;
         try {
           outcome = await this.playTurn();
@@ -805,9 +813,15 @@ export class Match {
       try {
         this.phase[side] = failures ? `重试 ${failures}/${MAX_FAILURES}` : "思考中";
         this.emit();
+        const endpoint = this.providerOf(side);
+        if (!endpoint?.baseUrl || !endpoint?.apiKey) {
+          this.pause();
+          this.hooks.onNeedSettings?.("供应商已失效，请在设置里重新选择");
+          return null;
+        }
         acc = await streamChat({
-          baseUrl: this.providerOf(side).baseUrl,
-          apiKey: this.providerOf(side).apiKey,
+          baseUrl: endpoint.baseUrl,
+          apiKey: endpoint.apiKey,
           model: player.model,
           messages: trimMessages(messages, player.contextTokens, this.echoReasoning, cap),
           tools: TOOLS,
