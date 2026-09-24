@@ -637,13 +637,18 @@ export function createUI(callbacks) {
       const select = document.querySelector(`#${side}-provider`);
       const current = select.value;
       select.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "请选择供应商";
+      select.append(placeholder);
       providers.forEach((provider, index) => {
         const option = document.createElement("option");
         option.value = provider.id;
         option.textContent = provider.name || `供应商 ${index + 1}`;
         select.append(option);
       });
-      if (providers.some((provider) => provider.id === current)) select.value = current;
+      if (current && providers.some((provider) => provider.id === current)) select.value = current;
+      else select.value = "";
     });
   }
 

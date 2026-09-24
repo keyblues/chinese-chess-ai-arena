@@ -7,6 +7,8 @@ import {
   thinkingOptionsForCapability,
   normalizeThinkingValue,
   resolveProvider,
+  settingsForStart,
+  discardSettingsDraft,
 } from "./settings-logic.js";
 import { testConnection } from "./llm.js";
 import { loadSettings, saveSettings, DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
@@ -18,7 +20,9 @@ assert.equal(insecureBaseUrlWarning("https://openrouter.ai/api/v1"), null);
 assert.equal(insecureBaseUrlWarning("http://localhost:8080/v1"), null);
 assert.equal(insecureBaseUrlWarning("http://127.0.0.1:9000/v1"), null);
 assert.match(insecureBaseUrlWarning("http://example.com/v1"), /HTTPS|明文/);
-assert.match(insecureBaseUrlWarning("not a url :::"), /无效|https/i);
+assert.match(insecureBaseUrlWarning("not a url :::"), /缺少协议|无效|https/i);
+assert.match(insecureBaseUrlWarning("api.example.com/v1"), /缺少协议/);
+assert.match(insecureBaseUrlWarning("example.com"), /缺少协议/);
 
 assert.equal(thinkingCapability("https://openrouter.ai/api/v1"), "levels");
 assert.equal(thinkingCapability("https://open.bigmodel.cn/api/paas/v4"), "toggle");
@@ -82,12 +86,23 @@ assert.equal(resolveProvider(providers, "pA")?.apiKey, "ka");
   assert.doesNotThrow(() => saveSettings(loaded));
 }
 
-// 开局不应悄悄落盘草稿：契约测试（逻辑约定）
+// 开局 / 取消：真实状态迁移（可失败的契约）
 {
-  const startUsesSavedOnly = true;
-  const closeDiscardsDraft = true;
-  assert.equal(startUsesSavedOnly, true);
-  assert.equal(closeDiscardsDraft, true);
+  assert.deepEqual(settingsForStart({ dirty: false }), { ok: true });
+  assert.deepEqual(settingsForStart({ dirty: true }), { ok: false, reason: "dirty" });
+
+  const saved = {
+    providers: [{ id: "p1", name: "A", baseUrl: "https://a.test/v1", apiKey: "k" }],
+    red: { name: "红", providerId: "p1", model: "m1", thinking: "off" },
+    black: { name: "黑", providerId: "p1", model: "m2", thinking: "off" },
+  };
+  let draft = { ...saved, red: { ...saved.red, model: "draft-model" } };
+  assert.notEqual(draft.red.model, saved.red.model);
+  draft = discardSettingsDraft(saved);
+  assert.equal(draft.red.model, "m1", "取消应恢复已保存模型");
+  draft.red.model = "mutated";
+  assert.equal(saved.red.model, "m1", "丢弃草稿不得改写已保存对象");
+  assert.equal(settingsForStart({ dirty: false }).ok, true);
 }
 
 console.log("settings logic ok");

@@ -13,9 +13,12 @@ export function escapeAttr(value) {
 export function insecureBaseUrlWarning(url) {
   const raw = String(url || "").trim();
   if (!raw) return null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    return "接口地址缺少协议（请使用 https://…）";
+  }
   let parsed;
   try {
-    parsed = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    parsed = new URL(raw);
   } catch {
     return "接口地址格式无效";
   }
@@ -26,6 +29,21 @@ export function insecureBaseUrlWarning(url) {
     return "接口地址不是 HTTPS，API Key 会明文传输";
   }
   return "接口地址应使用 https://";
+}
+
+/**
+ * 开局门闩：有未保存草稿则拒绝（开局只用已保存设置）。
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function settingsForStart({ dirty }) {
+  if (dirty) return { ok: false, reason: "dirty" };
+  return { ok: true };
+}
+
+/** 取消设置：丢弃草稿，返回已保存快照的深拷贝 */
+export function discardSettingsDraft(saved) {
+  if (!saved) return saved;
+  return JSON.parse(JSON.stringify(saved));
 }
 
 /**

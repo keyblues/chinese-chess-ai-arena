@@ -535,6 +535,17 @@ export class Match {
     return this.providers.find((provider) => provider.id === id) || null;
   }
 
+  /** 设置页保存后同步到进行中的对局，避免「修好供应商点继续」仍用构造时的旧 providers */
+  rebindSettings(settings) {
+    if (!settings) return;
+    this.providers = settings.providers || [];
+    if (settings.temperature != null) this.temperature = settings.temperature;
+    this.players = {
+      r: shapePlayer(settings.red, this.players.r),
+      b: shapePlayer(settings.black, this.players.b),
+    };
+  }
+
   snapshot() {
     return {
       id: this.id,

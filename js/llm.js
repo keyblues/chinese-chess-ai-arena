@@ -415,6 +415,9 @@ export async function streamChat(options) {
 }
 
 export async function testConnection({ baseUrl, apiKey, model, signal }) {
+  if (!String(model || "").trim()) {
+    throw new Error("请先填写模型 ID，再测试连接");
+  }
   const root = rootUrl(baseUrl);
   try {
     const listed = await fetch(`${root}/models`, {
@@ -428,10 +431,7 @@ export async function testConnection({ baseUrl, apiKey, model, signal }) {
     }
   } catch (error) {
     if (error?.name === "AbortError") throw error;
-    // /models 失败（含跨域）时改走对话探测；先检查模型 ID，避免误报成跨域
-  }
-  if (!String(model || "").trim()) {
-    throw new Error("请先填写模型 ID，再测试连接");
+    // /models 失败（含跨域）时改走对话探测
   }
   try {
     const acc = await streamChat({

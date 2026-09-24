@@ -4,6 +4,7 @@ import { Match, resultText } from "./match.js";
 import { clearActive, loadActive, loadMatches, loadSettings, saveActive, saveMatch, saveSettings } from "./storage.js";
 import { saveGameMemory, loadGameMemory, deleteGameMemory } from "./memory-store.js";
 import { createUI, transcript } from "./ui.js";
+import { settingsForStart } from "./settings-logic.js";
 
 let settings = loadSettings();
 let history = loadMatches();
@@ -18,6 +19,7 @@ const ui = createUI({
   onSave: (next) => {
     settings = next;
     saveSettings(settings);
+    match?.rebindSettings?.(settings);
     paint();
   },
   onTest: testApi,
@@ -170,9 +172,10 @@ function providerById(providers, id) {
 }
 
 function startMatch() {
-  if (ui.isSettingsDirty?.()) {
-    ui.toast("设置里有未保存的修改，请先保存或取消");
-    ui.openSettings();
+  const gate = settingsForStart({ dirty: Boolean(ui.isSettingsDirty?.()) });
+  if (!gate.ok) {
+    ui.toast("设置里有未保存的修改，请先打开设置并保存或取消");
+    // 不自动 openSettings：避免按已保存值重填把草稿冲掉
     return;
   }
   // 开局只用已保存的设置，不把对话框草稿悄悄落盘
