@@ -40,6 +40,29 @@ function configuredOutputCap(player) {
   return Math.max(256, Math.min(out, ctx));
 }
 
+/** 截断重试时裁判日志文案：只有 cap 真的抬高才说「已放宽」 */
+export function truncationNudgeText({ truncations, givingUp, hardCap, raised, cap }) {
+  const k = Math.round(Number(cap) / 1000);
+  if (givingUp) {
+    return `分析过长被截断未落子（第 ${truncations} 次）。连续被截断，裁判代走。`;
+  }
+  if (hardCap) {
+    return `分析过长被截断未落子（第 ${truncations} 次）。该模型输出上限 ${k}k 是硬顶，只能催它直接落子。`;
+  }
+  if (raised) {
+    return `分析过长被截断未落子（第 ${truncations} 次）。已放宽输出上限到 ${k}k 并催促直接落子。`;
+  }
+  return `分析过长被截断未落子（第 ${truncations} 次）。输出上限已是配置的 ${k}k，只能催促直接落子。`;
+}
+
+/** 截断重试时的 phase 文案：未抬高时不暗示「放宽」 */
+export function truncationRetryPhase({ hardCap, raised, cap }) {
+  const k = Math.round(Number(cap) / 1000);
+  if (hardCap) return `重试 · 输出被截断（上限 ${k}k 硬顶）`;
+  if (raised) return `重试 · 输出超长被截断（上限 ${k}k）`;
+  return `重试 · 输出被截断（已是配置上限 ${k}k）`;
+}
+
 const TRACE_KIND_ORDER = { think: 0, say: 1, tool: 2, nudge: 3 };
 
 // 同一回合内的条目按（步序，类型）排出确定次序：流式回调的到达顺序不影响棋谱时序
@@ -909,9 +932,12 @@ export class Match {
     const truncationRetry = (step, trace) => {
       truncations += 1;
       const givingUp = truncations > MAX_TRUNCATIONS;
+      let raised = false;
       if (!hardCap) {
-        // 不超过配置的输出上限，也不超过上下文窗
-        cap = Math.min(cap * 2, baseCap);
+        // 不超过配置的输出上限，也不超过上下文窗；只有真的抬高了才说「已放宽」
+        const next = Math.min(cap * 2, baseCap);
+        raised = next > cap;
+        cap = next;
         this.capFloor[side] = cap;
       }
       traceAdd(trace, {
@@ -920,11 +946,7 @@ export class Match {
         kind: "tool",
         title: "裁判",
         body: "",
-        result: givingUp
-          ? `分析过长被截断未落子（第 ${truncations} 次）。连续被截断，裁判代走。`
-          : hardCap
-            ? `分析过长被截断未落子（第 ${truncations} 次）。该模型输出上限 ${Math.round(cap / 1000)}k 是硬顶，只能催它直接落子。`
-            : `分析过长被截断未落子（第 ${truncations} 次）。已放宽输出上限到 ${Math.round(cap / 1000)}k 并催促直接落子。`,
+        result: truncationNudgeText({ truncations, givingUp, hardCap, raised, cap }),
         pending: false,
         ok: false,
       });
@@ -934,9 +956,7 @@ export class Match {
         commitMemory();
         return { kind: "random", reason: "输出连续被截断，裁判代走" };
       }
-      this.phase[side] = hardCap
-        ? `重试 · 输出被截断（上限 ${Math.round(cap / 1000)}k 硬顶）`
-        : `重试 · 输出超长被截断（上限 ${Math.round(cap / 1000)}k）`;
+      this.phase[side] = truncationRetryPhase({ hardCap, raised, cap });
       messages.push({
         role: "user",
         content: "你上一轮在输出上限处被截断，没有提交着法，那次输出已作废。不要再写分析，直接调用 commit_move 提交一步合法着法。",

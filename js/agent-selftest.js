@@ -15,6 +15,8 @@ import {
   compactMessages,
   KEEP_RECENT_TURNS,
   packMemory,
+  truncationNudgeText,
+  truncationRetryPhase,
 } from "./match.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 import { saveGameMemory, loadGameMemory, resetMemoryStoreForTests } from "./memory-store.js";
@@ -115,7 +117,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
 
 // 2) 首轮被截断：不带半截分析重发，输出上限翻倍
 {
-  const { outcome } = await play([
+  const { match, outcome } = await play([
     reasoning("我在想……先比较一下马八进七和炮二平五，然后……", "length"),
     toolCall("commit_move", { move: "b0c2", thought: "马八进七" }),
   ]);
@@ -124,6 +126,9 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.deepEqual(caps(), [8000, 8000], "截断重试不得超过配置的输出上限");
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截分析不许回灌历史");
   assert.match(requests[1].messages.at(-1).content, /截断/, "重发时要明确告知上一轮被截断");
+  const nudge = match.traces.r.map((item) => item.result || "").join(" ");
+  assert.match(nudge, /输出上限已是配置的 8k，只能催促直接落子/, "已在配置上限时不得谎称已放宽");
+  assert.equal(/已放宽/.test(nudge), false, "已在配置上限时日志不得出现「已放宽」");
 }
 
 // 3) 连续被截断：有界重试后交裁判代走，不会把 8 步全烧在重试上
@@ -739,6 +744,37 @@ console.log("agent loop ok");
   assert.ok(memWrites.length >= 1);
   const blob = JSON.stringify(memWrites[memWrites.length - 1]);
   assert.match(blob, /裁判代走/);
+}
+
+
+// 31) truncationNudgeText / truncationRetryPhase：四类文案互斥，已在上限时不说「已放宽」
+{
+  const givingUp = truncationNudgeText({ truncations: 3, givingUp: true, hardCap: false, raised: false, cap: 32768 });
+  assert.equal(givingUp, "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。");
+
+  const hard = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: true, raised: false, cap: 8192 });
+  assert.equal(hard, "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。");
+
+  const raised = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: false, raised: true, cap: 16000 });
+  assert.equal(raised, "分析过长被截断未落子（第 1 次）。已放宽输出上限到 16k 并催促直接落子。");
+
+  const ceiling = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: false, raised: false, cap: 32000 });
+  assert.equal(ceiling, "分析过长被截断未落子（第 1 次）。输出上限已是配置的 32k，只能催促直接落子。");
+  assert.equal(/已放宽/.test(ceiling), false);
+
+  // givingUp / hardCap 优先于 raised，避免组合态串文案
+  assert.equal(
+    truncationNudgeText({ truncations: 3, givingUp: true, hardCap: true, raised: true, cap: 8192 }),
+    "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。",
+  );
+  assert.equal(
+    truncationNudgeText({ truncations: 1, givingUp: false, hardCap: true, raised: true, cap: 8192 }),
+    "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。",
+  );
+
+  assert.equal(truncationRetryPhase({ hardCap: true, raised: false, cap: 8192 }), "重试 · 输出被截断（上限 8k 硬顶）");
+  assert.equal(truncationRetryPhase({ hardCap: false, raised: true, cap: 16000 }), "重试 · 输出超长被截断（上限 16k）");
+  assert.equal(truncationRetryPhase({ hardCap: false, raised: false, cap: 32000 }), "重试 · 输出被截断（已是配置上限 32k）");
 }
 
 console.log("agent regressions ok");
