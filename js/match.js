@@ -14,14 +14,31 @@ import {
 } from "./engine.js";
 import { toNotation } from "./notation.js";
 import { TOOLS, normalizeCalls, streamChat } from "./llm.js";
-import { clip } from "./storage.js";
+import { clip, DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 const MAX_STEPS = 8;
 const MAX_FAILURES = 3;
 const DRAW_PLIES = 120;
-// 输出被上限截断时不带半截文本重发，只抬高输出上限；连续截断超过这个次数就交给裁判代走
+// 输出被上限截断时不带半截文本重发，只在配置上限内抬高；连续截断超过这个次数就交给裁判代走
 const MAX_TRUNCATIONS = 2;
-const TRUNCATION_TOKEN_CAP = 64000;
+/** 上下文占用达到窗口的该比例时开始压缩历史（再与「窗口 − 输出上限」取较小值） */
+export const CONTEXT_COMPRESS_RATIO = 0.8;
+
+/** 压缩/trim 预算：min(比例×窗口, 窗口−输出)，保证 请求+输出 不顶破上下文窗 */
+export function contextBudget(contextTokens, maxOutputTokens = 0) {
+  const ctx = Number(contextTokens) > 0 ? Number(contextTokens) : DEFAULT_CONTEXT_TOKENS;
+  const out = Math.max(0, Number(maxOutputTokens) || 0);
+  const byRatio = Math.floor(ctx * CONTEXT_COMPRESS_RATIO);
+  const byWindow = ctx - out;
+  return Math.max(0, Math.min(byRatio, byWindow));
+}
+
+function configuredOutputCap(player) {
+  const ctx = Number(player?.contextTokens) > 0 ? Number(player.contextTokens) : DEFAULT_CONTEXT_TOKENS;
+  const out = Number(player?.maxOutputTokens) > 0 ? Number(player.maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS;
+  // 输出上限不得超过配置值，也不得超过整个上下文窗
+  return Math.max(256, Math.min(out, ctx));
+}
 
 const TRACE_KIND_ORDER = { think: 0, say: 1, tool: 2, nudge: 3 };
 
@@ -706,8 +723,8 @@ export class Match {
     // 本回合在棋谱里的序号（0 基）：日志条目带着它，回合之间就不会串位
     const turnPly = this.records.length;
     this.tracePly[side] = turnPly;
-    const baseCap = player.maxOutputTokens || 8000;
-    let cap = Math.max(baseCap, this.capFloor[side] || 0);
+    const baseCap = configuredOutputCap(player);
+    let cap = Math.min(baseCap, this.capFloor[side] > 0 ? this.capFloor[side] : baseCap);
     let hardCap = false; // 厂商拒过抬高后的上限：本回合不再抬
     this.traces[side] = [];
     this.preview = null;
@@ -740,7 +757,8 @@ export class Match {
       truncations += 1;
       const givingUp = truncations > MAX_TRUNCATIONS;
       if (!hardCap) {
-        cap = Math.min(cap * 2, TRUNCATION_TOKEN_CAP);
+        // 不超过配置的输出上限，也不超过上下文窗
+        cap = Math.min(cap * 2, baseCap);
         this.capFloor[side] = cap;
       }
       traceAdd(trace, {
@@ -1124,10 +1142,8 @@ export function trimMessages(messages, contextTokens, echoReasoning = false, max
     }
     return message.reasoning_content ? { ...message, reasoning_content: undefined } : message;
   });
-  const ctx = Number(contextTokens) || 128000;
   const reservedOut = Math.max(0, Number(maxOutputTokens) || 0);
-  // 扣掉本回合输出上限，避免 context+max_tokens 顶满整窗被 400
-  const budget = Math.max(2048, Math.floor((ctx - reservedOut) * 0.7));
+  const budget = contextBudget(contextTokens, reservedOut);
   let guard = 0;
   while (messagesTokens(list) > budget && list.length > 2 && guard < 64) {
     guard += 1;

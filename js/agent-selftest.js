@@ -11,7 +11,10 @@ import {
   collapseOldMemory,
   trimMessages,
   rebuildMemoryFromRecords,
+  contextBudget,
+  CONTEXT_COMPRESS_RATIO,
 } from "./match.js";
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 const encoder = new TextEncoder();
 
@@ -113,9 +116,9 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     reasoning("我在想……先比较一下马八进七和炮二平五，然后……", "length"),
     toolCall("commit_move", { move: "b0c2", thought: "马八进七" }),
   ]);
-  assert.equal(outcome.kind, "move", "抬高上限后应当能落子");
+  assert.equal(outcome.kind, "move", "截断重试后应当能落子");
   assert.equal(outcome.iccs, "b0c2");
-  assert.deepEqual(caps(), [8000, 16000], "截断后重发要把输出上限翻倍");
+  assert.deepEqual(caps(), [8000, 8000], "截断重试不得超过配置的输出上限");
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截分析不许回灌历史");
   assert.match(requests[1].messages.at(-1).content, /截断/, "重发时要明确告知上一轮被截断");
 }
@@ -129,7 +132,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     reasoning("长分析四", "length"),
   ]);
   assert.deepEqual(outcome, { kind: "random", reason: "输出连续被截断，裁判代走" });
-  assert.deepEqual(caps(), [8000, 16000, 32000], "最多抬高两次就该收手");
+  assert.deepEqual(caps(), [8000, 8000, 8000], "最多重试两次且不得超过配置上限");
 }
 
 // 4) 工具参数被截断（半截 JSON）同样按截断处理，不算违规
@@ -139,7 +142,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ]);
   assert.equal(outcome.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000]);
+  assert.deepEqual(caps(), [8000, 8000]);
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截工具调用不许回灌历史");
 }
 
@@ -164,27 +167,27 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   requests = [];
   const first = await match.playTurn();
   assert.equal(first.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000]);
+  assert.deepEqual(caps(), [8000, 8000]);
   requests = [];
   script = [toolCall("commit_move", { move: "b0c2", thought: "马八进七" })];
   const second = await match.playTurn();
   assert.equal(second.kind, "move");
-  assert.deepEqual(caps(), [16000], "下一回合应当从上一次抬高后的上限起步");
+  assert.deepEqual(caps(), [8000], "下一回合仍受配置输出上限约束");
 }
 
-// 7) 厂商把抬高的上限 400 拒掉时不许把整局打挂：退回原上限、继续下
+// 7) 厂商把过高的输出上限 400 拒掉时不许把整局打挂：压档后继续下
 {
   script = [
-    reasoning("想很久", "length"),
-    httpError(400, "max_tokens is too large: 16000"),
+    httpError(400, "max_tokens is too large: 32768"),
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ];
   requests = [];
-  const match = makeMatch();
+  const match = makeMatch(32768);
   const outcome = await match.playTurn();
-  assert.equal(outcome.kind, "move", "被 400 拒绝后仍要在原上限下把这一步走完");
-  assert.deepEqual(caps(), [8000, 16000, 8000], "退回原上限重发，而不是一路抬高");
-  assert.match(match.traces.r.find((item) => item.id === "nudge-1").result, /压到 8k/);
+  assert.equal(outcome.kind, "move", "被 400 拒绝后仍要把这一步走完");
+  assert.equal(caps()[0], 32768);
+  assert.ok(caps()[1] < 32768, "应压到更低档位重发");
+  assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到/);
 }
 
 // 8) DeepSeek 官方带 tools 时要求回传推理原文：先 400 一次，认出后整局都带上
@@ -213,9 +216,10 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     body.max_tokens > 8192
       ? httpError(400, "max_tokens is too large, maximum is 8192")
       : toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
+  // 输出上限不得超上下文窗：200k 配置在 128k 窗口下会被收成 128k
   const { match, outcome } = await play([strict, strict], 200000);
   assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
-  assert.deepEqual(caps(), [200000, 8192], "一次就要压到常见硬顶，别一步步折半烧步骤");
+  assert.deepEqual(caps(), [128000, 8192], "先受上下文窗约束，再一次压到常见硬顶");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
 }
 
@@ -355,7 +359,7 @@ console.log("agent loop ok");
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ]);
   assert.equal(outcome.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000], "JSON 路径的 length 也要抬高上限重发");
+  assert.deepEqual(caps(), [8000, 8000], "JSON 路径的 length 也要重发且不超过配置上限");
 }
 
 // 17) 裁判代走要打上 substitute 标记；旧存档无该字段仍可恢复
@@ -604,5 +608,29 @@ console.log("agent loop ok");
   assert.ok(rebuilt.some((m) => m.role === "tool" && /h2e2/.test(m.content || "")));
 }
 
+
+// 25) 压缩阈值：默认约 96k；小窗口取 min(80%, 窗−输出)；请求预算+输出不超过窗
+{
+  assert.equal(CONTEXT_COMPRESS_RATIO, 0.8);
+  assert.equal(DEFAULT_CONTEXT_TOKENS, 131072);
+  assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 32768);
+  const def = contextBudget(DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS);
+  assert.equal(def, Math.min(Math.floor(131072 * 0.8), 131072 - 32768));
+  assert.equal(def, 98304, "默认阈值应为 ~96k");
+  assert.ok(def + DEFAULT_MAX_OUTPUT_TOKENS <= DEFAULT_CONTEXT_TOKENS);
+
+  const small = contextBudget(10000, 8000);
+  assert.equal(small, Math.min(Math.floor(10000 * 0.8), 10000 - 8000));
+  assert.equal(small, 2000);
+  assert.ok(small + 8000 <= 10000);
+
+  const tight = contextBudget(5000, 4500);
+  assert.equal(tight, Math.min(Math.floor(5000 * 0.8), 5000 - 4500));
+  assert.equal(tight, 500);
+  assert.ok(tight + 4500 <= 5000);
+}
+
 console.log("agent regressions ok");
 console.log("board memory ok");
+console.log("context budget ok");
+
