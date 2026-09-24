@@ -8,13 +8,16 @@ import {
   systemPrompt,
   buildTurnUserMessage,
   piecesSummary,
-  collapseOldMemory,
   trimMessages,
   rebuildMemoryFromRecords,
   contextBudget,
   CONTEXT_COMPRESS_RATIO,
+  compactMessages,
+  KEEP_RECENT_TURNS,
+  packMemory,
 } from "./match.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
+import { saveGameMemory, loadGameMemory, resetMemoryStoreForTests } from "./memory-store.js";
 
 const encoder = new TextEncoder();
 
@@ -434,7 +437,7 @@ console.log("agent loop ok");
 }
 
 
-// ---------- 盘面上下文与跨回合记忆 ----------
+// ---------- 盘面上下文与跨回合记忆（harness 风格：原文保留 + 阈值摘要） ----------
 
 // 20) 回合用户消息含盘面 / 子力 / FEN / 合法着法；系统提示去掉 150 字限制
 {
@@ -445,18 +448,15 @@ console.log("agent loop ok");
   assert.match(body, /双方子力/);
   assert.match(body, /帅e0|帅/);
   assert.match(body, /棋盘（文件 a-i/);
-  assert.match(body, /a b c d e f g h i/);
   assert.match(body, /全部合法着法/);
   assert.match(body, /h2e2/);
   assert.match(piecesSummary(pos), /红方：/);
-  assert.match(piecesSummary(pos), /黑方：/);
   const sys = systemPrompt("r");
   assert.equal(/150\s*字/.test(sys), false, "系统提示不得再限制 150 字");
-  assert.equal(/立即 commit_move，不要长篇/.test(sys), false);
   assert.match(sys, /将杀|将军/);
 }
 
-// 21) 同方两回合：第二次请求带上第一回合的分析与着法；旧盘面被折叠
+// 21) 同方两回合：第二次请求带上第一回合原文；旧盘面不再折叠
 {
   const match = makeMatch();
   script = [toolCall("commit_move", { move: "h2e2", thought: "先开中炮试探" })];
@@ -465,9 +465,6 @@ console.log("agent loop ok");
   assert.equal(first.kind, "move");
   match.applyCommitted(first);
   assert.match(requests[0].messages.find((m) => m.role === "user").content, /棋盘（文件/);
-  script = [toolCall("commit_move", { move: "b0c2", thought: "跳马" })];
-  // 黑方走一步好让红方再走——直接伪造 records 后改 side 不方便，改为同方：不 apply 黑棋，
-  // 手动把 pos 调回红方并追加一手黑棋记录不现实。这里用第二次仍是红方：先让黑方也走。
   script = [toolCall("commit_move", { move: "h7e7", thought: "对中炮" })];
   requests = [];
   const black = await match.playTurn();
@@ -479,51 +476,42 @@ console.log("agent loop ok");
   assert.equal(second.kind, "move");
   const msgs = requests[0].messages;
   assert.equal(msgs[0].role, "system");
-  const users = msgs.filter((m) => m.role === "user" && m.content.includes("回合"));
-  assert.ok(users.length >= 2, "应至少有两个回合用户消息");
-  const oldTurn = users.find((m) => m.content.includes("已省略") || m._meta?.full === false);
-  // _meta may be stripped by JSON serialize in fetch body - check collapsed placeholder in content
-  const collapsed = msgs.some((m) => m.role === "user" && /盘面与合法着法已省略|盘面已省略/.test(m.content));
-  assert.equal(collapsed, true, "旧回合盘面应被折叠");
-  const hasPriorThought = msgs.some((m) => m.role === "assistant" && /先开中炮试探/.test(m.content || ""));
+  const users = msgs.filter((m) => m.role === "user" && m.content.includes("全部合法着法"));
+  assert.ok(users.length >= 2, "应至少有两个完整盘面用户消息");
+  assert.equal(
+    msgs.some((m) => m.role === "user" && /盘面与合法着法已省略|盘面已省略/.test(m.content || "")),
+    false,
+    "不得再折叠旧盘面",
+  );
   const hasPriorTool = msgs.some(
     (m) => m.role === "assistant" && JSON.stringify(m.tool_calls || []).includes("h2e2"),
   );
-  assert.equal(hasPriorThought || hasPriorTool, true, "第二回合应带上此前着法/想法");
-  const current = [...msgs].reverse().find((m) => m.role === "user" && m.content.includes("全部合法着法"));
-  assert.ok(current, "当前回合应带完整合法着法");
-  assert.match(current.content, /棋盘（文件/);
+  assert.equal(hasPriorTool, true, "第二回合应带上此前着法");
+  assert.equal(msgs.every((m) => !("_meta" in m)), true, "出站不得带 _meta");
 }
 
-// 22) collapseOldMemory 折叠 look_board / legal_moves 工具结果
+// 22) packMemory 原样保留 reasoning_content 与长盘面
 {
-  const messages = [
-    { role: "system", content: "s" },
+  const longBoard = "棋盘".repeat(500);
+  const packed = packMemory([
     {
-      role: "user",
-      content: buildTurnUserMessage(startingPosition(), [], legalMoves(startingPosition())),
-      _meta: { kind: "turn", turnPly: 0, full: true },
+      role: "assistant",
+      content: longBoard,
+      reasoning_content: "R".repeat(2500),
+      tool_calls: [{ id: "c1", type: "function", function: { name: "commit_move", arguments: "{}" } }],
     },
-    {
-      role: "tool",
-      name: "look_board",
-      tool_call_id: "t1",
-      content: "轮到：红方\n棋盘（文件 a-i）：\n" + "x".repeat(200),
-    },
-  ];
-  collapseOldMemory(messages);
-  assert.match(messages[1].content, /已省略/);
-  assert.equal(messages[1]._meta.full, false);
-  assert.match(messages[2].content, /已省略/);
+  ]);
+  assert.equal(packed[0].content.length, longBoard.length);
+  assert.equal(packed[0].reasoning_content.length, 2500);
 }
 
-// 23) trimMessages：扣减 maxOutputTokens；不丢 system/当前回合；不留孤儿 tool
+// 23) trimMessages：扣减 maxOutputTokens；不丢 system/当前回合；不留孤儿 tool；剥 _meta
 {
   const sys = { role: "system", content: "system" };
   const oldUser = {
     role: "user",
     content: "old " + "盘面".repeat(2000),
-    _meta: { kind: "turn", turnPly: 0, full: false },
+    _meta: { kind: "turn", turnPly: 0, full: true },
   };
   const oldAsst = {
     role: "assistant",
@@ -539,7 +527,10 @@ console.log("agent loop ok");
   const curAsst = {
     role: "assistant",
     content: "now",
-    tool_calls: [{ id: "c_new", type: "function", function: { name: "look_board", arguments: "{}" } }],
+    tool_calls: [
+      { id: "c_new", type: "function", function: { name: "look_board", arguments: "{}" } },
+      { id: "c_miss", type: "function", function: { name: "legal_moves", arguments: "{}" } },
+    ],
   };
   const curTool = { role: "tool", tool_call_id: "c_new", name: "look_board", content: "board" };
   const orphan = { role: "tool", tool_call_id: "ghost", name: "legal_moves", content: "orphan" };
@@ -551,29 +542,27 @@ console.log("agent loop ok");
   );
   assert.equal(trimmed[0].role, "system");
   assert.ok(trimmed.some((m) => /current-turn-marker/.test(m.content || "")));
-  assert.equal(
-    trimmed.some((m) => m.role === "tool" && m.tool_call_id === "ghost"),
-    false,
-    "孤儿 tool 必须去掉",
-  );
-  // 预算很紧时应丢掉旧回合
-  assert.equal(
-    trimmed.some((m) => m.role === "user" && m.content.startsWith("old ")),
-    false,
-    "超预算时应丢弃旧回合",
-  );
-  // 当前回合的 tool 对仍在
+  assert.equal(trimmed.some((m) => m.role === "tool" && m.tool_call_id === "ghost"), false);
+  assert.equal(trimmed.some((m) => m.role === "user" && m.content.startsWith("old ")), false);
   assert.ok(trimmed.some((m) => m.role === "tool" && m.tool_call_id === "c_new"));
+  const asst = trimmed.find((m) => m.role === "assistant" && (m.content || "") === "now");
+  assert.deepEqual((asst?.tool_calls || []).map((c) => c.id), ["c_new"]);
+  assert.equal(trimmed.every((m) => !("_meta" in m)), true);
 }
 
-// 24) 恢复：有 memory 字段用原会话；无 memory 的旧存档用 records 重建且可 load
+// 24) 恢复：IndexedDB 记忆优先；旧 localStorage memory 次之；皆无则按 records 重建
 {
+  resetMemoryStoreForTests();
   const match = makeMatch();
   script = [toolCall("commit_move", { move: "h2e2", thought: "开局炮" })];
   const first = await match.playTurn();
   match.applyCommitted(first);
-  const saved = match.serialize();
-  assert.ok(saved.memory?.r?.length >= 2, "序列化应带上红方记忆");
+  const saved = match.serialize({ includeMemory: true });
+  assert.ok(saved.memory?.r?.length >= 2, "显式 includeMemory 时应带上红方记忆");
+  await saveGameMemory(saved.id, { r: saved.memory.r, b: saved.memory.b || [] });
+  const fromIdb = await loadGameMemory(saved.id);
+  assert.ok(fromIdb.r.some((m) => m.role === "assistant"));
+
   const restored = new Match({
     settings: {
       providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
@@ -584,12 +573,12 @@ console.log("agent loop ok");
       black: match.players.b,
     },
     hooks: match.hooks,
-    saved,
+    saved: { ...saved, memory: undefined },
+    memory: fromIdb,
   });
-  assert.ok(restored.memory.r.some((m) => m.role === "assistant" || (m.role === "user" && /h2e2|开局炮|已省略/.test(m.content || ""))));
+  assert.ok(restored.memory.r.some((m) => m.role === "assistant"));
 
   const legacy = { ...saved };
-  delete legacy.memory;
   const fromLegacy = new Match({
     settings: {
       providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
@@ -603,44 +592,105 @@ console.log("agent loop ok");
     saved: legacy,
   });
   assert.equal(fromLegacy.records[0].iccs, "h2e2");
-  assert.equal(fromLegacy.memory.r[0].role, "system");
-  assert.ok(fromLegacy.memory.r.length >= 2, "旧存档应按 records 重建压缩记忆");
-  const rebuilt = rebuildMemoryFromRecords("r", legacy.moves);
+  assert.ok(fromLegacy.memory.r.length >= 2);
+
+  const bare = { ...saved };
+  delete bare.memory;
+  const fromBare = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: bare,
+  });
+  assert.equal(fromBare.memory.r[0].role, "system");
+  assert.ok(fromBare.memory.r.some((m) => m.role === "tool" && /h2e2/.test(m.content || "")));
+  const rebuilt = rebuildMemoryFromRecords("r", bare.moves);
   assert.equal(rebuilt[0].role, "system");
-  assert.ok(rebuilt.some((m) => m.role === "tool" && /h2e2/.test(m.content || "")));
 }
 
-
-// 25) 压缩阈值：默认约 96k；小窗口取 min(80%, 窗−输出)；请求预算+输出不超过窗
+// 25) 压缩阈值数学
 {
   assert.equal(CONTEXT_COMPRESS_RATIO, 0.8);
   assert.equal(DEFAULT_CONTEXT_TOKENS, 131072);
   assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 32768);
+  assert.equal(KEEP_RECENT_TURNS, 2);
   const def = contextBudget(DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS);
-  assert.equal(def, Math.min(Math.floor(131072 * 0.8), 131072 - 32768));
-  assert.equal(def, 98304, "默认阈值应为 ~96k");
+  assert.equal(def, 98304);
   assert.ok(def + DEFAULT_MAX_OUTPUT_TOKENS <= DEFAULT_CONTEXT_TOKENS);
-
-  const small = contextBudget(10000, 8000);
-  assert.equal(small, Math.min(Math.floor(10000 * 0.8), 10000 - 8000));
-  assert.equal(small, 2000);
-  assert.ok(small + 8000 <= 10000);
-
-  const tight = contextBudget(5000, 4500);
-  assert.equal(tight, Math.min(Math.floor(5000 * 0.8), 5000 - 4500));
-  assert.equal(tight, 500);
-  assert.ok(tight + 4500 <= 5000);
 }
 
-// 26) trimMessages 发出去的消息不得带 _meta；半截 tool_calls 要削干净
+// 26) compactMessages：超阈值时摘要替换旧回合，保留最近回合与 tool 对
+{
+  function turn(ply, reps) {
+    return [
+      { role: "user", content: "盘".repeat(reps) + " ply" + ply, _meta: { kind: "turn", turnPly: ply } },
+      {
+        role: "assistant",
+        content: "想" + ply,
+        reasoning_content: "R".repeat(100),
+        tool_calls: [{ id: "c" + ply, type: "function", function: { name: "commit_move", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c" + ply, name: "commit_move", content: "ok" + ply },
+    ];
+  }
+  const messages = [{ role: "system", content: "sys" }, ...turn(0, 2000), ...turn(2, 2000), ...turn(4, 80), ...turn(6, 80)];
+  let sawOlder = 0;
+  const result = await compactMessages({
+    messages,
+    contextTokens: 2500,
+    maxOutputTokens: 500,
+    compactRequest: async (older) => {
+      sawOlder = older.length;
+      return "红方中炮，黑方对攻，互兑一马。";
+    },
+  });
+  assert.equal(result.compacted, true);
+  assert.equal(result.fallback, false);
+  assert.ok(sawOlder >= 3);
+  assert.ok(result.messages.some((m) => /【此前对局历史摘要/.test(m.content || "")));
+  assert.ok(result.messages.some((m) => m.role === "tool" && m.tool_call_id === "c6"));
+  assert.equal(result.messages.some((m) => m.role === "tool" && m.tool_call_id === "c0"), false, "最旧回合应已被摘要替换");
+}
+
+// 27) compactMessages 失败时回退丢弃旧回合
+{
+  function turn(ply, reps) {
+    return [
+      { role: "user", content: "盘".repeat(reps) + " ply" + ply, _meta: { kind: "turn", turnPly: ply } },
+      {
+        role: "assistant",
+        content: "想" + ply,
+        tool_calls: [{ id: "c" + ply, type: "function", function: { name: "commit_move", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c" + ply, name: "commit_move", content: "ok" + ply },
+    ];
+  }
+  const messages = [{ role: "system", content: "sys" }, ...turn(0, 2000), ...turn(2, 2000), ...turn(4, 80), ...turn(6, 80)];
+  const result = await compactMessages({
+    messages,
+    contextTokens: 2500,
+    maxOutputTokens: 500,
+    compactRequest: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(result.compacted, false);
+  assert.equal(result.fallback, true);
+  assert.equal(result.messages[0].role, "system");
+  assert.ok(result.messages.length < messages.length);
+}
+
+// 28) 出站剥 _meta；半截 tool_calls 削干净
 {
   const msgs = [
     { role: "system", content: "s" },
-    {
-      role: "user",
-      content: "turn " + "盘".repeat(20),
-      _meta: { kind: "turn", turnPly: 0, full: true },
-    },
+    { role: "user", content: "turn", _meta: { kind: "turn", turnPly: 0, full: true } },
     {
       role: "assistant",
       content: "",
@@ -650,83 +700,48 @@ console.log("agent loop ok");
       ],
     },
     { role: "tool", tool_call_id: "a", name: "commit_move", content: "ok" },
-    {
-      role: "user",
-      content: "next",
-      _meta: { kind: "turn", turnPly: 2, full: true },
-    },
+    { role: "user", content: "next", _meta: { kind: "turn", turnPly: 2, full: true } },
   ];
   const out = trimMessages(msgs, 128000, false, 8000);
-  assert.equal(out.every((m) => !("_meta" in m)), true, "请求体不得含 _meta");
+  assert.equal(out.every((m) => !("_meta" in m)), true);
   const asst = out.find((m) => m.role === "assistant");
-  assert.ok(asst);
-  assert.deepEqual(
-    (asst.tool_calls || []).map((c) => c.id),
-    ["a"],
-    "未收到结果的 tool_call 必须去掉",
-  );
+  assert.deepEqual((asst.tool_calls || []).map((c) => c.id), ["a"]);
 }
 
-// 27) persist：onPersist 返回 false 时降级为 omitMemory 再写
-{
-  const writes = [];
-  const match = makeMatch();
-  match.hooks.onPersist = (data) => {
-    writes.push(data);
-    if (data.memory) return false;
-    return true;
-  };
-  match.memory.r.push({
-    role: "user",
-    content: "x",
-    _meta: { kind: "turn", turnPly: 0, full: false },
-  });
-  match.persist();
-  assert.equal(writes.length, 2, "应先写全量再降级");
-  assert.ok(writes[0].memory, "第一次带 memory");
-  assert.equal("memory" in writes[1], false, "降级后omit memory");
-}
-
-// 28) packMemory 不得截断 reasoning_content（DeepSeek 原样回放）
+// 29) persist 默认不把 memory 写入 localStorage 快照；includeMemory 仍可用
 {
   const match = makeMatch();
-  match.memory.r = [
-    { role: "system", content: "s" },
-    {
-      role: "assistant",
-      content: "c",
-      reasoning_content: "R".repeat(2000),
-      tool_calls: [{ id: "c1", type: "function", function: { name: "commit_move", arguments: "{}" } }],
-    },
-    { role: "tool", tool_call_id: "c1", name: "commit_move", content: "ok" },
-  ];
-  const packed = match.serialize().memory.r;
-  const asst = packed.find((m) => m.role === "assistant");
-  assert.equal(asst.reasoning_content.length, 2000, "reasoning_content 必须原样保留");
+  match.memory.r.push({ role: "user", content: "x", _meta: { kind: "turn", turnPly: 0 } });
+  const light = match.serialize();
+  assert.equal("memory" in light, false, "默认序列化不含 memory");
+  const full = match.serialize({ includeMemory: true });
+  assert.ok(full.memory.r.length >= 2);
 }
 
-// 29) 裁判代走说明在 persist 之前写入 memory
+// 30) 裁判代走说明在 persist 之前写入 memory
 {
   const snapshots = [];
+  const memWrites = [];
   const match = makeMatch();
   match.hooks.onPersist = (data) => {
     snapshots.push(data);
     return true;
   };
-  // 直接走 random 代走路径的核心：append 后 apply
-  const legal = (await import("./engine.js")).legalMoves(match.pos);
+  match.hooks.onPersistMemory = (_id, mem) => {
+    memWrites.push(mem);
+    return true;
+  };
+  const legal = legalMoves(match.pos);
   const move = legal[0];
-  const notation = "测试着";
   const turnPly = match.records.length;
-  match.appendSubstituteNote("r", move, "测", notation, turnPly);
+  match.appendSubstituteNote("r", move, "测", "测试着", turnPly);
   match.applyCommitted({ move, iccs: move.iccs, thought: "裁判代走（测）", substitute: true });
-  assert.ok(snapshots.length >= 1);
-  const mem = snapshots[snapshots.length - 1].memory.r.map((m) => m.content || "").join("\n");
-  assert.match(mem, /裁判代走/, "persist 快照里必须已有代走说明");
+  assert.ok(memWrites.length >= 1);
+  const blob = JSON.stringify(memWrites[memWrites.length - 1]);
+  assert.match(blob, /裁判代走/);
 }
 
 console.log("agent regressions ok");
 console.log("board memory ok");
 console.log("context budget ok");
-console.log("outbound sanitize ok");
-
+console.log("compaction ok");

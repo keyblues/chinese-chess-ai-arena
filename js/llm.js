@@ -335,7 +335,7 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
           body: JSON.stringify({
             model,
             messages,
-            tools,
+            ...(tools ? { tools } : {}),
             temperature,
             max_tokens: maxTokens ?? 8000,
             stream: true,
