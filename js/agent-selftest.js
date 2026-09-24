@@ -81,7 +81,7 @@ globalThis.fetch = async (_url, options) => {
 };
 
 function makeMatch(maxOutputTokens = 8000, baseUrl = "https://stub.test/v1", thinking = "off") {
-  const player = (name) => ({ name, providerId: "p", model: "stub-model", thinking, contextTokens: 128000, maxOutputTokens });
+  const player = (name) => ({ name, providerId: "p", model: "stub-model", thinking, contextTokens: DEFAULT_CONTEXT_TOKENS, maxOutputTokens });
   return new Match({
     settings: {
       providers: [{ id: "p", name: "stub", baseUrl, apiKey: "k" }],
@@ -190,15 +190,15 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
 // 7) 厂商把过高的输出上限 400 拒掉时不许把整局打挂：压档后继续下
 {
   script = [
-    httpError(400, "max_tokens is too large: 32768"),
+    httpError(400, "max_tokens is too large: 65536"),
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ];
   requests = [];
-  const match = makeMatch(32768);
+  const match = makeMatch(65536);
   const outcome = await match.playTurn();
   assert.equal(outcome.kind, "move", "被 400 拒绝后仍要把这一步走完");
-  assert.equal(caps()[0], 32768);
-  assert.ok(caps()[1] < 32768, "应压到更低档位重发");
+  assert.equal(caps()[0], 65536);
+  assert.ok(caps()[1] < 65536, "应压到更低档位重发");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到/);
 }
 
@@ -228,10 +228,10 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     body.max_tokens > 8192
       ? httpError(400, "max_tokens is too large, maximum is 8192")
       : toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
-  // 输出上限不得超上下文窗：200k 配置在 128k 窗口下会被收成 128k
-  const { match, outcome } = await play([strict, strict], 200000);
+  // 输出上限不得超上下文窗：300k 配置在 256k 窗口下会被收成 256k
+  const { match, outcome } = await play([strict, strict], 300000);
   assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
-  assert.equal(caps()[0] <= 128000, true, "先受上下文窗约束（还要给 prompt 留位）");
+  assert.equal(caps()[0] <= 262144, true, "先受上下文窗约束（还要给 prompt 留位");
   assert.ok(caps()[0] > 100000, "大窗口下输出上限应接近窗宽");
   assert.equal(caps()[1], 8192, "再一次压到常见硬顶");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
@@ -634,11 +634,11 @@ console.log("agent loop ok");
 // 25) 压缩阈值数学
 {
   assert.equal(CONTEXT_COMPRESS_RATIO, 0.8);
-  assert.equal(DEFAULT_CONTEXT_TOKENS, 131072);
-  assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 32768);
+  assert.equal(DEFAULT_CONTEXT_TOKENS, 262144);
+  assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 65536);
   assert.equal(KEEP_RECENT_TURNS, 2);
   const def = contextBudget(DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS);
-  assert.equal(def, 98304);
+  assert.equal(def, 196608);
   assert.ok(def + DEFAULT_MAX_OUTPUT_TOKENS <= DEFAULT_CONTEXT_TOKENS);
 }
 
@@ -719,7 +719,7 @@ console.log("agent loop ok");
     { role: "tool", tool_call_id: "a", name: "commit_move", content: "ok" },
     { role: "user", content: "next", _meta: { kind: "turn", turnPly: 2, full: true } },
   ];
-  const out = trimMessages(msgs, 128000, false, 8000);
+  const out = trimMessages(msgs, DEFAULT_CONTEXT_TOKENS, false, 8000);
   assert.equal(out.every((m) => !("_meta" in m)), true);
   const asst = out.find((m) => m.role === "assistant");
   assert.deepEqual((asst.tool_calls || []).map((c) => c.id), ["a"]);
@@ -763,26 +763,26 @@ console.log("agent loop ok");
 {
   const base = { truncations: 1, givingUp: false, hardCap: false, roomLimited: false };
 
-  const givingUp = truncationNudgeText({ ...base, truncations: 3, givingUp: true, cap: 32768, sendCap: 32768 });
+  const givingUp = truncationNudgeText({ ...base, truncations: 3, givingUp: true, cap: 65536, sendCap: 65536 });
   assert.equal(givingUp, "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。");
 
   const hard = truncationNudgeText({ ...base, hardCap: true, cap: 8192, sendCap: 8192 });
   assert.equal(hard, "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。");
 
-  const ceiling = truncationNudgeText({ ...base, cap: 32000, sendCap: 32000 });
-  assert.equal(ceiling, "分析过长被截断未落子（第 1 次）。输出上限已是配置的 32k，只能催促直接落子。");
+  const ceiling = truncationNudgeText({ ...base, cap: 64000, sendCap: 64000 });
+  assert.equal(ceiling, "分析过长被截断未落子（第 1 次）。输出上限已是配置的 64k，只能催促直接落子。");
   assert.equal(/已放宽/.test(ceiling), false);
 
   // 上下文余量把实际 max_tokens 夹到配置顶以下：必须报 sendCap，且不得说已放宽
   const room = truncationNudgeText({
     ...base,
     roomLimited: true,
-    cap: 32000,
+    cap: 64000,
     sendCap: 4000,
   });
   assert.equal(
     room,
-    "分析过长被截断未落子（第 1 次）。本请求实际输出上限 4k（配置 32k，受上下文余量限制），只能催促直接落子。",
+    "分析过长被截断未落子（第 1 次）。本请求实际输出上限 4k（配置 64k，受上下文余量限制），只能催促直接落子。",
   );
   assert.equal(/已放宽/.test(room), false);
 
@@ -797,9 +797,9 @@ console.log("agent loop ok");
   );
 
   assert.equal(truncationRetryPhase({ ...base, hardCap: true, cap: 8192, sendCap: 8192 }), "重试 · 输出被截断（上限 8k 硬顶）");
-  assert.equal(truncationRetryPhase({ ...base, cap: 32000, sendCap: 32000 }), "重试 · 输出被截断（已是配置上限 32k）");
+  assert.equal(truncationRetryPhase({ ...base, cap: 64000, sendCap: 64000 }), "重试 · 输出被截断（已是配置上限 64k）");
   assert.equal(
-    truncationRetryPhase({ ...base, roomLimited: true, cap: 32000, sendCap: 4000 }),
+    truncationRetryPhase({ ...base, roomLimited: true, cap: 64000, sendCap: 4000 }),
     "重试 · 输出被截断（实际上限 4k，上下文余量）",
   );
 }
@@ -818,7 +818,7 @@ console.log("agent loop ok");
   assert.ok(reasoningPart.replace("…", "").length <= DIGEST_REASONING_CLIP + 5);
 }
 
-// 33) 固定配置 k=32k：截断重试三次请求都是同一 k，不得翻倍阶梯
+// 33) 固定配置 k=64k：截断重试三次请求都是同一 k，不得翻倍阶梯
 {
   const { match, outcome } = await play(
     [
@@ -827,10 +827,10 @@ console.log("agent loop ok");
       reasoning("烧三", "length"),
       reasoning("烧四", "length"),
     ],
-    32768,
+    65536,
   );
   assert.deepEqual(outcome, { kind: "random", reason: "输出连续被截断，裁判代走" });
-  assert.deepEqual(caps(), [32768, 32768, 32768], "截断重试始终用配置的固定 k");
+  assert.deepEqual(caps(), [65536, 65536, 65536], "截断重试始终用配置的固定 k");
   const nudge = match.traces.r.map((item) => item.result || "").join(" ");
   assert.equal(/已放宽/.test(nudge), false, "固定 k 日志不得出现「已放宽」");
 }
@@ -855,14 +855,14 @@ console.log("agent loop ok");
 // 36) 厂商 400 拒收后记住可用档：下一手从该档起步，不回满配置顶去再撞墙
 {
   script = [
-    httpError(400, "max_tokens is too large: 32768"),
+    httpError(400, "max_tokens is too large: 65536"),
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ];
   requests = [];
-  const match = makeMatch(32768);
+  const match = makeMatch(65536);
   const first = await match.playTurn();
   assert.equal(first.kind, "move");
-  assert.equal(caps()[0], 32768);
+  assert.equal(caps()[0], 65536);
   assert.equal(caps()[1], 8192);
   assert.equal(match.capFloor.r, 8192, "应记住厂商肯收的档位");
   requests = [];

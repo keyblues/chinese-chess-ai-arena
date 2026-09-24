@@ -123,12 +123,12 @@
           </label>
           <div class="pair">
             <label>上下文（token）
-              <input id="red-context" type="number" min="1024" placeholder="131072" />
-              <span class="field-hint">默认 128k；历史约占用 80% 窗口时压缩</span>
+              <input id="red-context" type="number" min="1024" placeholder="262144" />
+              <span class="field-hint">默认 256k；历史约占用 80% 窗口时压缩</span>
             </label>
             <label>最大输出（token）
-              <input id="red-maxout" type="number" min="256" placeholder="32768" />
-              <span class="field-hint">默认 32k；压缩阈值还会为输出留出空间</span>
+              <input id="red-maxout" type="number" min="256" placeholder="65536" />
+              <span class="field-hint">默认 64k；压缩阈值还会为输出留出空间</span>
             </label>
           </div>
         </div>
@@ -143,12 +143,12 @@
           </label>
           <div class="pair">
             <label>上下文（token）
-              <input id="black-context" type="number" min="1024" placeholder="131072" />
-              <span class="field-hint">默认 128k；历史约占用 80% 窗口时压缩</span>
+              <input id="black-context" type="number" min="1024" placeholder="262144" />
+              <span class="field-hint">默认 256k；历史约占用 80% 窗口时压缩</span>
             </label>
             <label>最大输出（token）
-              <input id="black-maxout" type="number" min="256" placeholder="32768" />
-              <span class="field-hint">默认 32k；压缩阈值还会为输出留出空间</span>
+              <input id="black-maxout" type="number" min="256" placeholder="65536" />
+              <span class="field-hint">默认 64k；压缩阈值还会为输出留出空间</span>
             </label>
           </div>
         </div>

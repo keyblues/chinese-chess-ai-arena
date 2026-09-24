@@ -91,7 +91,7 @@ assert.equal(resolveProvider(providers, "pA")?.apiKey, "ka");
       mainMinutes: 60,
       incrementSeconds: 60,
       red: { name: "红", providerId: "p1", model: "m", thinking: "off", contextTokens: 64000, maxOutputTokens: 4000 },
-      black: { name: "黑", providerId: "p1", model: "m2" },
+      black: { name: "黑", providerId: "p1", model: "m2", contextTokens: "", maxOutputTokens: "" },
     }),
   );
   const loaded = loadSettings();

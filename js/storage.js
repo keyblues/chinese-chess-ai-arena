@@ -3,9 +3,9 @@ const ACTIVE_KEY = "xq.active";
 const MATCHES_KEY = "xq.matches";
 const MATCH_LIMIT = 30;
 
-/** 新玩家 / 空字段默认：128k 上下文、32k 输出（已有存档里的数字不迁移） */
-export const DEFAULT_CONTEXT_TOKENS = 131072;
-export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
+/** 新玩家 / 空字段默认：256k 上下文、64k 输出（已有存档里的数字不迁移） */
+export const DEFAULT_CONTEXT_TOKENS = 262144;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 65536;
 
 export function makeProvider(data = {}) {
   return {
