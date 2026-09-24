@@ -435,10 +435,24 @@ export class Match {
             return;
           }
           const move = legal[Math.floor(Math.random() * legal.length)];
+          const side = this.pos.side;
+          const turnPly = this.records.length;
+          const reason = outcome.reason || "模型未落子";
+          const notation = toNotation(this.pos, move);
+          traceAdd(this.traces[side], {
+            id: `nudge-sub-${turnPly}`,
+            ply: turnPly,
+            kind: "tool",
+            title: "裁判",
+            body: "",
+            result: `裁判代走 ${move.iccs} ${notation}（${reason}）`,
+            pending: false,
+            ok: false,
+          });
           this.applyCommitted({
             move,
             iccs: move.iccs,
-            thought: `裁判代走（${outcome.reason || "模型未落子"}）`,
+            thought: `裁判代走（${reason}）`,
             substitute: true,
           });
           const after = resolveAfterMove(this.pos, this.records, this.positions);
@@ -877,8 +891,13 @@ function trimMessages(messages, contextTokens, echoReasoning = false) {
 function previewMove(call, legalMap) {
   if (call.name && call.name !== "commit_move") return null;
   const args = parseArgs(call.arguments);
-  if (!args) return null;
-  const move = parseLegalIcCS(args.move, legalMap);
+  let raw = args?.move;
+  // 流式半截 JSON 解析失败时，仍只从 move 字段取值（整串），绝不扫整段 arguments 做子串匹配
+  if (raw == null && typeof call.arguments === "string") {
+    const match = call.arguments.match(/"move"\s*:\s*"([^"]*)"/);
+    if (match) raw = match[1];
+  }
+  const move = parseLegalIcCS(raw, legalMap);
   if (!move) return null;
   return { from: move.from, to: move.to, iccs: move.iccs };
 }

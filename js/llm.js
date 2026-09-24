@@ -123,11 +123,17 @@ function accumulate(acc, delta) {
   if (typeof delta.reasoning === "string") acc.reasoning += delta.reasoning;
   if (typeof delta.content === "string") acc.content += delta.content;
   for (const call of delta.tool_calls || []) {
-    // 缺 index 时接到已有最后一槽（没有则 0），避免把同一次调用拆成两段
+    // 缺 index：有 id 则按 id 归槽（新 id 开新槽）；否则接到已有最后一槽。带 index 的并行调用不受影响。
     let index = call.index;
+    if (typeof index === "string" && /^\d+$/.test(index)) index = Number(index);
     if (index == null || !Number.isFinite(index)) {
-      index = acc.toolCalls.length ? acc.toolCalls.length - 1 : 0;
-      while (index > 0 && !acc.toolCalls[index]) index -= 1;
+      if (call.id) {
+        const existing = acc.toolCalls.findIndex((item) => item && item.id === call.id);
+        index = existing >= 0 ? existing : acc.toolCalls.length;
+      } else {
+        index = acc.toolCalls.length ? acc.toolCalls.length - 1 : 0;
+        while (index > 0 && !acc.toolCalls[index]) index -= 1;
+      }
     }
     if (!acc.toolCalls[index]) acc.toolCalls[index] = { index, id: "", name: "", arguments: "" };
     const item = acc.toolCalls[index];

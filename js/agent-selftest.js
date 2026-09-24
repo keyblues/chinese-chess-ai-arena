@@ -349,7 +349,7 @@ console.log("agent loop ok");
   assert.deepEqual(caps(), [8000, 16000], "JSON 路径的 length 也要抬高上限重发");
 }
 
-// 17) 裁判代走要打上 substitute 标记（旧存档无此字段仍可 load）
+// 17) 裁判代走要打上 substitute 标记；旧存档无该字段仍可恢复
 {
   const { match, outcome } = await play([
     reasoning("只说不做"),
@@ -368,7 +368,54 @@ console.log("agent loop ok");
   assert.equal(match.records[0].substitute, true, "代走记录必须带 substitute");
   const saved = match.serialize().moves[0];
   assert.equal(saved.substitute, true, "序列化要保留 substitute");
-  assert.equal("substitute" in { notation: "炮二平五" }, false, "旧记录没有该字段时保持兼容");
+
+  const legacy = {
+    id: "old",
+    players: match.players,
+    moves: [{ side: "r", iccs: "h2e2", notation: "炮二平五", thought: "老存档", timeMs: 10 }],
+    clocks: { r: 60000, b: 60000 },
+    mainMinutes: 60,
+  };
+  const again = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: legacy,
+  });
+  assert.equal(again.records[0].substitute, undefined, "旧存档无 substitute 字段时不得臆造");
+  assert.equal(again.records[0].iccs, "h2e2");
+}
+
+// 18) 带 index 的并行 tool_calls 不得被缺 index 逻辑打乱
+{
+  const parallel = sse([
+    { choices: [{ delta: { tool_calls: [
+      { index: 0, id: "c0", function: { name: "legal_moves", arguments: "{}" } },
+      { index: 1, id: "c1", function: { name: "commit_move", arguments: '{"move":"h2e2","thought":"炮二平五"}' } },
+    ] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const { outcome } = await play([parallel]);
+  assert.equal(outcome.kind, "move");
+  assert.equal(outcome.iccs, "h2e2", "并行调用应按 index 分槽，最终仍能 commit");
+}
+
+// 19) 缺 index 但带新 id：应开新槽，不能并进上一调用
+{
+  const byId = sse([
+    { choices: [{ delta: { tool_calls: [{ id: "c0", function: { name: "legal_moves", arguments: "{}" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c1", function: { name: "commit_move", arguments: '{"move":"b0c2","thought":"马八进七"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const { outcome } = await play([byId]);
+  assert.equal(outcome.kind, "move");
+  assert.equal(outcome.iccs, "b0c2", "新 id 缺 index 时应开新槽");
 }
 
 console.log("agent regressions ok");
