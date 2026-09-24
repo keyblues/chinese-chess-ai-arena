@@ -1,7 +1,8 @@
 // Agent 循环的行为测试：用假 fetch 喂固定 SSE，检查"被截断"这一类情况的处理。
 // 跑法：node js/agent-selftest.js
 import assert from "node:assert/strict";
-import { Match } from "./match.js";
+import { fromFEN, legalMoves, positionKey } from "./engine.js";
+import { Match, resolveAfterMove } from "./match.js";
 
 const encoder = new TextEncoder();
 
@@ -41,6 +42,13 @@ function brokenToolCall(name, partialArgs) {
 
 function httpError(status, message) {
   return new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } });
+}
+
+function jsonChat(message, finish_reason = "stop") {
+  return new Response(
+    JSON.stringify({ choices: [{ message, finish_reason }] }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 }
 
 let script = [];
@@ -242,3 +250,172 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
 }
 
 console.log("agent loop ok");
+
+
+// ---------- 回归：终局裁定次序 / 代走可见 / 工具解析 ----------
+
+// 12) 将死优先于 120 步无吃子；困毙同理
+{
+  const mateAt120 = fromFEN("R3k4/9/4P4/2N3N2/9/9/9/9/9/4K4 b - - 120 1");
+  assert.deepEqual(
+    resolveAfterMove(mateAt120, [], [positionKey(mateAt120)]),
+    { winner: "r", reason: "将死" },
+    "halfmove=120 的将死不能记成无吃子和棋",
+  );
+  const stalemateAt120 = fromFEN("3k5/9/9/9/9/9/9/9/3p1p3/4K4 w - - 120 1");
+  assert.deepEqual(
+    resolveAfterMove(stalemateAt120, [], [positionKey(stalemateAt120)]),
+    { winner: "b", reason: "困毙" },
+    "halfmove=120 的困毙不能记成无吃子和棋",
+  );
+  const quietAt120 = fromFEN("4k4/9/9/9/9/9/9/9/9/4K4 w - - 120 1");
+  assert.deepEqual(
+    resolveAfterMove(quietAt120, [], [positionKey(quietAt120)]),
+    { winner: "draw", reason: "120步无吃子" },
+    "非终局且 120 步无吃子才判和",
+  );
+}
+
+// 13) 子串 ICCS 必须拒绝：'先别 a0a1，我想 h2e2' 不得吃到 a0a1
+{
+  const match = makeMatch();
+  const legalMap = new Map(legalMoves(match.pos).map((move) => [move.iccs, move]));
+  const bad = match.executeTool(
+    { name: "commit_move", arguments: JSON.stringify({ move: "先别 a0a1，我想 h2e2", thought: "试探" }) },
+    legalMap,
+  );
+  assert.equal(bad.ok, false, "含子串的 move 必须拒绝");
+  assert.equal(bad.failure, true);
+  const good = match.executeTool(
+    { name: "commit_move", arguments: JSON.stringify({ move: "h2e2", thought: "炮二平五" }) },
+    legalMap,
+  );
+  assert.equal(good.ok, true);
+  assert.equal(good.outcome.iccs, "h2e2");
+  const spaced = match.executeTool(
+    { name: "commit_move", arguments: JSON.stringify({ move: "  H2E2  ", thought: "炮二平五" }) },
+    legalMap,
+  );
+  assert.equal(spaced.ok, true, "整串去空白+大小写不敏感仍应接受");
+  assert.equal(spaced.outcome.iccs, "h2e2");
+}
+
+// 14) 对象形态的 function.arguments：parseArgs / 非流式 ingest 都能吃
+{
+  const match = makeMatch();
+  const legalMap = new Map(legalMoves(match.pos).map((move) => [move.iccs, move]));
+  const executed = match.executeTool(
+    { name: "commit_move", arguments: { move: "h2e2", thought: "炮二平五" } },
+    legalMap,
+  );
+  assert.equal(executed.ok, true, "arguments 直接是对象时也要能解析");
+  assert.equal(executed.outcome.iccs, "h2e2");
+
+  const { outcome } = await play([
+    jsonChat({
+      tool_calls: [
+        {
+          id: "call_obj",
+          type: "function",
+          function: { name: "commit_move", arguments: { move: "b0c2", thought: "马八进七" } },
+        },
+      ],
+    }, "tool_calls"),
+  ]);
+  assert.equal(outcome.kind, "move");
+  assert.equal(outcome.iccs, "b0c2", "JSON 非流式路径要把对象 arguments 规范化");
+}
+
+// 15) 缺 index 的 tool_calls delta：接到同一槽，不能拆成两次调用
+{
+  const split = sse([
+    { choices: [{ delta: { tool_calls: [{ id: "call_1", function: { name: "commit_move", arguments: '{"move":"h2e2"' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ function: { arguments: ',"thought":"炮二平五"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const { outcome } = await play([split]);
+  assert.equal(outcome.kind, "move", "缺 index 的后续 delta 应拼回同一调用");
+  assert.equal(outcome.iccs, "h2e2");
+  assert.equal(outcome.thought, "炮二平五");
+}
+
+// 16) JSON 非流式响应也要带上 finish_reason，截断才能触发抬限重试
+{
+  const { outcome } = await play([
+    jsonChat({ content: "分析被掐断……" }, "length"),
+    toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
+  ]);
+  assert.equal(outcome.kind, "move");
+  assert.deepEqual(caps(), [8000, 16000], "JSON 路径的 length 也要抬高上限重发");
+}
+
+// 17) 裁判代走要打上 substitute 标记；旧存档无该字段仍可恢复
+{
+  const { match, outcome } = await play([
+    reasoning("只说不做"),
+    reasoning("还是不调用工具"),
+    reasoning("第三次了"),
+  ]);
+  assert.equal(outcome.kind, "random");
+  const legal = legalMoves(match.pos);
+  const move = legal[0];
+  match.applyCommitted({
+    move,
+    iccs: move.iccs,
+    thought: `裁判代走（${outcome.reason}）`,
+    substitute: true,
+  });
+  assert.equal(match.records[0].substitute, true, "代走记录必须带 substitute");
+  const saved = match.serialize().moves[0];
+  assert.equal(saved.substitute, true, "序列化要保留 substitute");
+
+  const legacy = {
+    id: "old",
+    players: match.players,
+    moves: [{ side: "r", iccs: "h2e2", notation: "炮二平五", thought: "老存档", timeMs: 10 }],
+    clocks: { r: 60000, b: 60000 },
+    mainMinutes: 60,
+  };
+  const again = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: legacy,
+  });
+  assert.equal(again.records[0].substitute, undefined, "旧存档无 substitute 字段时不得臆造");
+  assert.equal(again.records[0].iccs, "h2e2");
+}
+
+// 18) 带 index 的并行 tool_calls 不得被缺 index 逻辑打乱
+{
+  const parallel = sse([
+    { choices: [{ delta: { tool_calls: [
+      { index: 0, id: "c0", function: { name: "legal_moves", arguments: "{}" } },
+      { index: 1, id: "c1", function: { name: "commit_move", arguments: '{"move":"h2e2","thought":"炮二平五"}' } },
+    ] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const { outcome } = await play([parallel]);
+  assert.equal(outcome.kind, "move");
+  assert.equal(outcome.iccs, "h2e2", "并行调用应按 index 分槽，最终仍能 commit");
+}
+
+// 19) 缺 index 但带新 id：应开新槽，不能并进上一调用
+{
+  const byId = sse([
+    { choices: [{ delta: { tool_calls: [{ id: "c0", function: { name: "legal_moves", arguments: "{}" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "c1", function: { name: "commit_move", arguments: '{"move":"b0c2","thought":"马八进七"}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const { outcome } = await play([byId]);
+  assert.equal(outcome.kind, "move");
+  assert.equal(outcome.iccs, "b0c2", "新 id 缺 index 时应开新槽");
+}
+
+console.log("agent regressions ok");

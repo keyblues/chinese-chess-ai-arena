@@ -262,6 +262,13 @@ export function createUI(callbacks) {
       no.className = "no";
       no.textContent = String(Math.floor(i / 2) + 1);
       button.append(no, document.createTextNode(moves[i].notation));
+      if (moves[i].substitute) {
+        const tag = document.createElement("span");
+        tag.className = "sub";
+        tag.textContent = "裁判代走";
+        tag.title = moves[i].thought || "裁判代走";
+        button.append(tag);
+      }
       button.addEventListener("click", () => callbacks.onPly?.(i + 1));
       li.append(button);
       list.append(li);
@@ -708,11 +715,16 @@ export function createUI(callbacks) {
   return { update, setClocks, fillSettings, readSettings, setHistory, setModels, setTestResult, toast, fitBoard, openSettings: () => document.querySelector("#settings").showModal() };
 }
 
+function moveLabel(move) {
+  if (!move?.notation) return "";
+  return move.substitute ? `${move.notation}（裁判代走）` : move.notation;
+}
+
 export function transcript(moves) {
   const lines = [];
   for (let i = 0; i < moves.length; i += 2) {
-    const red = moves[i]?.notation || "";
-    const black = moves[i + 1]?.notation || "";
+    const red = moveLabel(moves[i]);
+    const black = moveLabel(moves[i + 1]);
     lines.push(`${i / 2 + 1}. ${red}${black ? ` ${black}` : ""}`);
   }
   return lines.join("\n");

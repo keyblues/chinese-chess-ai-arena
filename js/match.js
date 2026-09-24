@@ -52,8 +52,8 @@ function systemPrompt(side) {
     "每步消息都会附上全部合法着法：比较后直接调用 commit_move 提交其中一步，move 必须逐字来自该列表。",
     "需要复核盘面时才调用 look_board 或 legal_moves，不要重复查询。",
     "分析不超过 150 字：从合法着法中选定一步，立即 commit_move，不要长篇推演。",
-    "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选。",
-    "胜负由裁判裁定：将死、困毙、认输、违规、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
+    "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选；连续多次违规或未落子时，裁判会从合法着法中随机代走一步（不会因此判负）。",
+    "胜负由裁判裁定：将死、困毙、认输、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
   ].join("\n");
 }
 
@@ -72,13 +72,31 @@ function turnPrompt(pos, records) {
 }
 
 function parseArgs(text) {
-  const raw = String(text || "").trim();
+  if (text && typeof text === "object" && !Array.isArray(text)) return text;
+  const raw = String(text ?? "").trim();
   if (!raw) return {};
   try {
     return JSON.parse(raw);
   } catch {
     return null;
   }
+}
+
+// 只接受整串 ICCS（去空白、大小写不敏感），且必须在当前合法着法表里；拒绝子串匹配。
+function parseLegalIcCS(raw, legalMap) {
+  const text = String(raw ?? "").trim().toLowerCase();
+  if (!/^[a-i][0-9][a-i][0-9]$/.test(text)) return null;
+  return legalMap.get(text) || null;
+}
+
+// 落子后裁定：将死/困毙优先于重复局面，再才是 120 步无吃子（避免将死步碰巧撞上 halfmove=120 被记成和棋）。
+export function resolveAfterMove(pos, records, positions) {
+  const terminal = terminalStatus(pos);
+  if (terminal) return terminal;
+  const repeated = repetition(records, positions);
+  if (repeated) return repeated;
+  if (pos.halfmove >= DRAW_PLIES) return { winner: "draw", reason: "120步无吃子" };
+  return null;
 }
 
 // 有些厂商/模型的输出上限是硬顶（例如 deepseek-chat 只收 8k）：把上限抬上去会被 400 直接拒掉。
@@ -305,6 +323,7 @@ export class Match {
         notation: item.notation,
         thought: clip(item.thought, 500),
         timeMs: item.timeMs,
+        ...(item.substitute ? { substitute: true } : {}),
         trace: (item.trace || []).slice(-8),
       })),
       clocks: this.clocks,
@@ -399,16 +418,7 @@ export class Match {
         if (!outcome) continue;
         if (outcome.kind === "move") {
           this.applyCommitted(outcome);
-          const repeated = repetition(this.records, this.positions);
-          if (repeated) {
-            this.finish(repeated);
-            return;
-          }
-          if (this.pos.halfmove >= DRAW_PLIES) {
-            this.finish({ winner: "draw", reason: "120步无吃子" });
-            return;
-          }
-          const after = terminalStatus(this.pos);
+          const after = resolveAfterMove(this.pos, this.records, this.positions);
           if (after) {
             this.finish(after);
             return;
@@ -417,7 +427,7 @@ export class Match {
           this.finish({ winner: opposite(this.pos.side), reason: "认输", detail: outcome.thought });
           return;
         } else if (outcome.kind === "random") {
-          // 模型行为失当不终结比赛：裁判从合法着法中随机代走一步
+          // 模型行为失当不终结比赛：裁判从合法着法中随机代走一步，并在棋谱上标出
           const legal = legalMoves(this.pos);
           if (!legal.length) {
             const terminal = terminalStatus(this.pos);
@@ -425,24 +435,31 @@ export class Match {
             return;
           }
           const move = legal[Math.floor(Math.random() * legal.length)];
-          this.applyCommitted({ move, iccs: move.iccs, thought: `裁判代走（${outcome.reason || "模型未落子"}）` });
-          const repeated = repetition(this.records, this.positions);
-          if (repeated) {
-            this.finish(repeated);
-            return;
-          }
-          if (this.pos.halfmove >= DRAW_PLIES) {
-            this.finish({ winner: "draw", reason: "120步无吃子" });
-            return;
-          }
-          const after = terminalStatus(this.pos);
+          const side = this.pos.side;
+          const turnPly = this.records.length;
+          const reason = outcome.reason || "模型未落子";
+          const notation = toNotation(this.pos, move);
+          traceAdd(this.traces[side], {
+            id: `nudge-sub-${turnPly}`,
+            ply: turnPly,
+            kind: "tool",
+            title: "裁判",
+            body: "",
+            result: `裁判代走 ${move.iccs} ${notation}（${reason}）`,
+            pending: false,
+            ok: false,
+          });
+          this.applyCommitted({
+            move,
+            iccs: move.iccs,
+            thought: `裁判代走（${reason}）`,
+            substitute: true,
+          });
+          const after = resolveAfterMove(this.pos, this.records, this.positions);
           if (after) {
             this.finish(after);
             return;
           }
-        } else if (outcome.kind === "forfeit") {
-          this.finish({ winner: opposite(this.pos.side), reason: "违规", detail: outcome.reason });
-          return;
         }
       }
     } finally {
@@ -740,24 +757,22 @@ export class Match {
       };
     }
     if (call.name === "commit_move") {
-      const raw = String(args.move || "");
-      const found = raw.toLowerCase().match(/[a-i][0-9][a-i][0-9]/);
-      const iccs = found ? found[0] : "";
-      const chosen = legalMap.get(iccs);
+      const raw = args.move;
+      const chosen = parseLegalIcCS(raw, legalMap);
       if (!chosen) {
         return {
           ok: false,
           failure: true,
           reason: "着法非法",
-          text: `非法着法 ${raw || "（空）"}。请重新调用 legal_moves，再从列表中提交一步。`,
+          text: `非法着法 ${raw == null || raw === "" ? "（空）" : String(raw)}。请重新调用 legal_moves，再从列表中提交一步（move 须为整串 ICCS）。`,
         };
       }
       const thought = String(args.thought || "").slice(0, 200);
       return {
         ok: true,
         done: true,
-        text: `已接受 ${iccs} ${toNotation(this.pos, chosen)}`,
-        outcome: { kind: "move", move: chosen, thought, iccs },
+        text: `已接受 ${chosen.iccs} ${toNotation(this.pos, chosen)}`,
+        outcome: { kind: "move", move: chosen, thought, iccs: chosen.iccs },
       };
     }
     return {
@@ -798,6 +813,7 @@ export class Match {
       thought: outcome.thought,
       timeMs: spent,
       gaveCheck: inCheck(next, next.side),
+      substitute: Boolean(outcome.substitute),
       trace: clipTrace(this.traces[side]),
     };
     this.records.push(record);
@@ -872,11 +888,18 @@ function trimMessages(messages, contextTokens, echoReasoning = false) {
   return list;
 }
 
-function previewMove(call, legalMap) {  if (call.name && call.name !== "commit_move") return null;
-  const found = String(call.arguments || "").toLowerCase().match(/[a-i][0-9][a-i][0-9]/);
-  if (!found || !legalMap.has(found[0])) return null;
-  const move = legalMap.get(found[0]);
-  return { from: move.from, to: move.to, iccs: found[0] };
+function previewMove(call, legalMap) {
+  if (call.name && call.name !== "commit_move") return null;
+  const args = parseArgs(call.arguments);
+  let raw = args?.move;
+  // 流式半截 JSON 解析失败时，仍只从 move 字段取值（整串），绝不扫整段 arguments 做子串匹配
+  if (raw == null && typeof call.arguments === "string") {
+    const match = call.arguments.match(/"move"\s*:\s*"([^"]*)"/);
+    if (match) raw = match[1];
+  }
+  const move = parseLegalIcCS(raw, legalMap);
+  if (!move) return null;
+  return { from: move.from, to: move.to, iccs: move.iccs };
 }
 
 function clipTrace(items) {
