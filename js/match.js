@@ -123,48 +123,28 @@ export function buildTurnUserMessage(pos, records, legal) {
   ].join("\n");
 }
 
-function collapseTurnUserContent(content, turnPly) {
-  const text = String(content || "");
-  if (!text.includes("棋盘（文件") && !text.includes("全部合法着法")) return text;
-  const round = Math.floor(Number(turnPly) / 2) + 1;
-  const keep = text
-    .split("\n")
-    .filter((line) => /^(第\s*\d+|对方上一手|被将军|距上次吃子|FEN：)/.test(line.trim()))
-    .slice(0, 5);
-  return `${keep.join("\n")}\n（第${round}回合盘面与合法着法已省略）`;
-}
+/** 压缩时至少保留的最近完整回合数（含 tool 对） */
+export const KEEP_RECENT_TURNS = 2;
 
-export function collapseOldMemory(messages) {
-  for (let i = 0; i < messages.length; i += 1) {
-    const message = messages[i];
-    if (message.role === "user" && message._meta?.kind === "turn" && message._meta.full) {
-      messages[i] = {
-        ...message,
-        content: collapseTurnUserContent(message.content, message._meta.turnPly ?? 0),
-        _meta: { ...message._meta, full: false },
-      };
-    }
-    if (message.role === "tool" && (message.name === "look_board" || message.name === "legal_moves")) {
-      const body = String(message.content || "");
-      if (body.length > 100 || body.includes("棋盘") || /^\s*共\s*\d+\s*着/m.test(body)) {
-        messages[i] = { ...message, content: "（盘面/合法着法查询结果已省略）" };
-      }
-    }
-  }
-  return messages;
-}
+const COMPACT_SYSTEM = [
+  "你是中国象棋对局的记忆压缩器，正在为同一名执棋智能体浓缩更早的对话。",
+  "请根据提供的历史，用简洁中文写出一份给未来自己的摘要，保留：",
+  "己方计划与意图、看到的威胁与战术主题、对手倾向、关键交换/失子、当前形势判断。",
+  "不要列出全部着法，不要调用工具，不要续写下一手。只输出摘要正文。",
+].join("");
 
-function packMemory(messages) {
+function cloneMessages(messages) {
   return (messages || []).map((message) => {
-    const packed = { role: message.role, content: clip(message.content, 2400) };
-    if (message.name) packed.name = message.name;
-    if (message.tool_call_id) packed.tool_call_id = message.tool_call_id;
-    if (message.tool_calls) packed.tool_calls = message.tool_calls;
-    // DeepSeek 带 tools 时要求 reasoning_content 原样回放，截断会导致重载后持续 400
-    if (typeof message.reasoning_content === "string") packed.reasoning_content = message.reasoning_content;
-    if (message._meta) packed._meta = { ...message._meta, full: false };
-    return packed;
+    const copy = { ...message };
+    if (message.tool_calls) copy.tool_calls = message.tool_calls.map((call) => ({ ...call, function: call.function ? { ...call.function } : call.function }));
+    if (message._meta) copy._meta = { ...message._meta };
+    return copy;
   });
+}
+
+/** 完整保留会话（不再折叠盘面、不截断 reasoning） */
+export function packMemory(messages) {
+  return cloneMessages(messages);
 }
 
 export function rebuildMemoryFromRecords(side, records) {
@@ -174,7 +154,7 @@ export function rebuildMemoryFromRecords(side, records) {
     const turnPly = index;
     messages.push({
       role: "user",
-      content: `（第${Math.floor(turnPly / 2) + 1}回合盘面已省略；你走了 ${record.iccs} ${record.notation}${record.substitute ? " · 裁判代走" : ""}。想法：${record.thought || "无"}）`,
+      content: `（第${Math.floor(turnPly / 2) + 1}回合盘面未存档；你走了 ${record.iccs} ${record.notation}${record.substitute ? " · 裁判代走" : ""}。想法：${record.thought || "无"}）`,
       _meta: { kind: "turn", turnPly, full: false },
     });
     if (record.substitute) {
@@ -208,6 +188,98 @@ export function rebuildMemoryFromRecords(side, records) {
     });
   });
   return messages;
+}
+
+function findTurnStarts(list) {
+  const starts = [];
+  for (let i = 1; i < list.length; i += 1) {
+    if (list[i].role === "user" && list[i]._meta?.kind === "turn") starts.push(i);
+  }
+  return starts;
+}
+
+function keepStartIndex(list, keepTurns = KEEP_RECENT_TURNS) {
+  const starts = findTurnStarts(list);
+  if (starts.length <= keepTurns) return 1;
+  return starts[starts.length - keepTurns];
+}
+
+function digestForCompaction(messages) {
+  return (messages || [])
+    .map((message) => {
+      const bits = [`[${message.role}]`];
+      if (message.content) bits.push(String(message.content));
+      if (typeof message.reasoning_content === "string" && message.reasoning_content) {
+        bits.push(`(reasoning) ${message.reasoning_content}`);
+      }
+      if (message.tool_calls?.length) bits.push(`(tool_calls) ${JSON.stringify(message.tool_calls)}`);
+      if (message.role === "tool") bits.push(`(tool_call_id=${message.tool_call_id}) name=${message.name || ""}`);
+      return bits.join("\n");
+    })
+    .join("\n---\n");
+}
+
+function dropUntilFit(messages, budget) {
+  let list = cloneMessages(messages);
+  let guard = 0;
+  while (messagesTokens(list) > budget && list.length > 2 && guard < 64) {
+    guard += 1;
+    const currentStart = findCurrentTurnStart(list);
+    if (currentStart <= 1) break;
+    const next = dropOldestTurn(list, currentStart);
+    if (next.length >= list.length) break;
+    list = next;
+  }
+  return sanitizeToolProtocol(list);
+}
+
+/**
+ * 阈值内：原样返回。超阈值：让模型摘要更早回合，保留最近 KEEP_RECENT_TURNS 个完整回合。
+ * 摘要失败则回退为按整回合丢弃（dropUntilFit）。
+ */
+export async function compactMessages({
+  messages,
+  contextTokens,
+  maxOutputTokens,
+  compactRequest,
+}) {
+  const budget = contextBudget(contextTokens, maxOutputTokens);
+  const list = cloneMessages(messages);
+  if (messagesTokens(list) <= budget) {
+    return { messages: list, compacted: false, fallback: false };
+  }
+  const keepFrom = keepStartIndex(list, KEEP_RECENT_TURNS);
+  const older = list.slice(1, keepFrom);
+  const recent = list.slice(keepFrom);
+  if (!older.length) {
+    return { messages: dropUntilFit(list, budget), compacted: false, fallback: true };
+  }
+  try {
+    if (typeof compactRequest !== "function") throw new Error("no compactRequest");
+    const summary = String((await compactRequest(older)) || "").trim() || "（无摘要内容）";
+    let next = [
+      list[0],
+      {
+        role: "user",
+        content: `【此前对局历史摘要——由你先前的思考压缩而成，供后续回合参考】\n${summary}`,
+        _meta: { kind: "summary" },
+      },
+      ...recent,
+    ];
+    let fallback = false;
+    if (messagesTokens(next) > budget) {
+      next = dropUntilFit(next, budget);
+      fallback = true;
+    }
+    return { messages: next, compacted: true, fallback };
+  } catch (error) {
+    return {
+      messages: dropUntilFit(list, budget),
+      compacted: false,
+      fallback: true,
+      error,
+    };
+  }
 }
 
 function stripUnmetToolCalls(result, pending) {
@@ -394,7 +466,7 @@ function shapePlayer(raw, fallback) {
 }
 
 export class Match {
-  constructor({ settings, hooks, saved }) {
+  constructor({ settings, hooks, saved, memory }) {
     this.hooks = hooks;
     this.id = saved?.id || `m_${Date.now()}`;
     this.startedAt = saved?.startedAt || Date.now();
@@ -441,14 +513,20 @@ export class Match {
     this.echoReasoning = false;
     // 厂商不认思考强度字段时整局不再发，见 thinkingRejected
     this.dropThinking = false;
-    // 双方跨回合会话：系统提示只放一次，此后追加每手的盘面与工具往返
+    // 双方跨回合会话：完整保留。优先 IndexedDB 注入的 memory，其次旧存档里的 memory，否则按棋谱重建。
+    const fromIdb = memory && (Array.isArray(memory.r) || Array.isArray(memory.b));
+    const fromSaved = saved?.memory && (Array.isArray(saved.memory.r) || Array.isArray(saved.memory.b));
     this.memory = {
-      r: Array.isArray(saved?.memory?.r) && saved.memory.r.length
-        ? saved.memory.r
-        : rebuildMemoryFromRecords("r", this.records),
-      b: Array.isArray(saved?.memory?.b) && saved.memory.b.length
-        ? saved.memory.b
-        : rebuildMemoryFromRecords("b", this.records),
+      r: fromIdb && memory.r?.length
+        ? memory.r
+        : fromSaved && saved.memory.r?.length
+          ? saved.memory.r
+          : rebuildMemoryFromRecords("r", this.records),
+      b: fromIdb && memory.b?.length
+        ? memory.b
+        : fromSaved && saved.memory.b?.length
+          ? saved.memory.b
+          : rebuildMemoryFromRecords("b", this.records),
     };
   }
 
@@ -527,11 +605,20 @@ export class Match {
   }
 
   persist() {
-    const full = this.serialize();
-    const ok = this.hooks.onPersist?.(full);
-    if (ok === false) {
-      this.hooks.onPersist?.(this.serialize({ omitMemory: true }));
+    // 棋谱等轻量状态进 localStorage；完整会话进 IndexedDB（经 onPersistMemory）
+    const ok = this.hooks.onPersist?.(this.serialize({ omitMemory: true }));
+    const mem = { r: packMemory(this.memory.r), b: packMemory(this.memory.b) };
+    try {
+      const result = this.hooks.onPersistMemory?.(this.id, mem);
+      if (result && typeof result.then === "function") {
+        result.catch?.(() => this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建"));
+      } else if (result === false) {
+        this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建");
+      }
+    } catch {
+      this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建");
     }
+    return ok;
   }
 
   serialize(options = {}) {
@@ -559,11 +646,9 @@ export class Match {
       tracePly: { ...this.tracePly },
       result: this.result,
     };
-    if (!options.omitMemory) {
-      data.memory = {
-        r: packMemory(collapseOldMemory(this.memory.r.map((item) => ({ ...item })))),
-        b: packMemory(collapseOldMemory(this.memory.b.map((item) => ({ ...item })))),
-      };
+    // 默认不把完整会话塞进 localStorage；测试 / 导出可显式 includeMemory
+    if (options.includeMemory) {
+      data.memory = { r: packMemory(this.memory.r), b: packMemory(this.memory.b) };
     }
     return data;
   }
@@ -742,16 +827,67 @@ export class Match {
     if (!this.memory[side]?.length) {
       this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
     }
-    collapseOldMemory(this.memory[side]);
     const turnUser = {
       role: "user",
       content: buildTurnUserMessage(this.pos, this.records, legal),
       _meta: { kind: "turn", turnPly, full: true },
     };
+    // 回合开始前压缩：超阈值则摘要旧回合，失败则整回合丢弃；不在回合中途打断 tool 协议
+    const projected = [...this.memory[side], turnUser];
+    const budget = contextBudget(player.contextTokens, cap);
+    if (messagesTokens(projected) > budget) {
+      this.phase[side] = "压缩上下文";
+      this.emit();
+      const endpoint = this.providerOf(side);
+      const result = await compactMessages({
+        messages: this.memory[side],
+        contextTokens: player.contextTokens,
+        maxOutputTokens: cap,
+        compactRequest: async (older) => {
+          if (!endpoint?.baseUrl || !endpoint?.apiKey) throw new Error("no provider");
+          const digest = digestForCompaction(older);
+          const acc = await streamChat({
+            baseUrl: endpoint.baseUrl,
+            apiKey: endpoint.apiKey,
+            model: player.model,
+            messages: [
+              { role: "system", content: COMPACT_SYSTEM },
+              { role: "user", content: digest.slice(0, 120000) },
+            ],
+            temperature: Math.min(0.3, this.temperature),
+            maxTokens: Math.min(4096, baseCap),
+            thinking: null,
+            signal: this.controller?.signal,
+          });
+          return acc.content || "";
+        },
+      });
+      this.memory[side] = result.messages;
+      const note = result.compacted
+        ? result.fallback
+          ? "上下文已压缩（摘要后仍超限，已再丢弃旧回合）"
+          : "上下文已压缩"
+        : result.fallback
+          ? "上下文压缩失败，已丢弃旧回合"
+          : "";
+      if (note) {
+        traceAdd(this.traces[side], {
+          id: `nudge-compact-${turnPly}`,
+          ply: turnPly,
+          kind: "nudge",
+          title: "裁判",
+          body: "",
+          result: note,
+          pending: false,
+          ok: result.compacted && !result.fallback,
+        });
+        this.emit();
+      }
+    }
     // 本回合在工作副本上推进：截断半截输出仍不回灌；成功或代走后再写回长期记忆
     const messages = [...this.memory[side], turnUser];
     const commitMemory = () => {
-      this.memory[side] = messages.map((item) => ({ ...item }));
+      this.memory[side] = cloneMessages(messages);
     };
     let failures = 0;
     let truncations = 0;

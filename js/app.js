@@ -2,6 +2,7 @@ import { applyMove, inCheck, parseIcCS, startingPosition, toFEN } from "./engine
 import { testConnection } from "./llm.js";
 import { Match, resultText } from "./match.js";
 import { clearActive, loadActive, loadMatches, loadSettings, saveActive, saveMatch, saveSettings } from "./storage.js";
+import { saveGameMemory, loadGameMemory, deleteGameMemory } from "./memory-store.js";
 import { createUI, transcript } from "./ui.js";
 
 let settings = loadSettings();
@@ -63,12 +64,15 @@ const hooks = {
     if (!review) ui.setClocks(clocks);
   },
   onPersist: (data) => saveActive(data),
+  onPersistMemory: (gameId, memory) => saveGameMemory(gameId, memory, { onWarn: (msg) => ui.toast(msg) }),
+  onMemoryWarn: (msg) => ui.toast(msg),
   onNeedSettings: (message) => {
     ui.toast(message);
     ui.openSettings();
   },
   onFinish: (data) => {
     clearActive();
+    void deleteGameMemory(data.id);
     history = saveMatch(data);
     ui.setHistory(history);
     paint();
@@ -245,12 +249,27 @@ function openHistory(id) {
 
 ui.fillSettings(settings);
 ui.setHistory(history);
-const saved = loadActive();
-if (saved) {
-  match = new Match({ settings, hooks, saved });
+
+async function restoreActive() {
+  const saved = loadActive();
+  if (!saved) return;
+  let memory = null;
+  try {
+    memory = await loadGameMemory(saved.id, { onWarn: (msg) => ui.toast(msg) });
+  } catch {
+    memory = null;
+  }
+  match = new Match({ settings, hooks, saved, memory: memory || undefined });
   match.status = "paused";
   match.paused = true;
-  ui.toast("已恢复未完成的对局，点继续接着下");
+  if (!memory && !saved.memory) {
+    ui.toast("已恢复未完成的对局（会话按棋谱重建），点继续接着下");
+  } else {
+    ui.toast("已恢复未完成的对局，点继续接着下");
+  }
+  paint();
 }
+
+await restoreActive();
 paint();
 ui.fitBoard();
