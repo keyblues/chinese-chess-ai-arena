@@ -67,7 +67,8 @@ export function thinkingParams(baseUrl, thinking) {
   if (host.includes("siliconflow.cn") || host.includes("dashscope") || host.includes("aliyuncs.com")) {
     return { enable_thinking: level !== "off" };
   }
-  if (host.includes("moonshot.cn")) {
+  if (host.includes("moonshot.cn") || host.includes("xiaomimimo.com")) {
+    // 小米 MiMo：thinking 默认 enabled；UI「关」必须显式 type=disabled，否则推理烧光 max_tokens
     return { thinking: { type: level === "off" ? "disabled" : "enabled" } };
   }
   return null;
@@ -441,6 +442,8 @@ export async function testConnection({ baseUrl, apiKey, model, signal }) {
       messages: [{ role: "user", content: "回复一个字：好" }],
       temperature: 0,
       maxTokens: 32,
+      // 显式关思考：否则小米 MiMo 等默认开思考，32 token 全烧在推理上，探测像「无正文」
+      thinking: "off",
       signal,
     });
     return { ok: true, message: acc.content ? "对话接口可用" : "接口有响应", models: [] };

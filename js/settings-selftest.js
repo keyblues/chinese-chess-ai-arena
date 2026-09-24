@@ -10,7 +10,7 @@ import {
   settingsForStart,
   discardSettingsDraft,
 } from "./settings-logic.js";
-import { testConnection } from "./llm.js";
+import { testConnection, thinkingParams } from "./llm.js";
 import { loadSettings, saveSettings, DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 assert.equal(escapeAttr(`a"b'<c>`), "a&quot;b&#39;&lt;c&gt;");
@@ -29,6 +29,22 @@ assert.equal(thinkingCapability("https://open.bigmodel.cn/api/paas/v4"), "toggle
 assert.equal(thinkingCapability("https://api.moonshot.cn/v1"), "toggle");
 assert.equal(thinkingCapability("https://api.siliconflow.cn/v1"), "toggle");
 assert.equal(thinkingCapability("https://api.deepseek.com"), "none");
+assert.equal(thinkingCapability("https://api.xiaomimimo.com/v1"), "toggle", "小米 MiMo 可开关思考");
+assert.equal(thinkingCapability("https://api.xiaomimimo.com/v1/"), "toggle");
+assert.equal(normalizeThinkingValue("off", thinkingCapability("https://api.xiaomimimo.com/v1")), "off");
+assert.equal(normalizeThinkingValue("high", thinkingCapability("https://api.xiaomimimo.com/v1")), "high");
+assert.deepEqual(
+  thinkingParams("https://api.xiaomimimo.com/v1", "off"),
+  { thinking: { type: "disabled" } },
+  "MiMo off → thinking.type disabled",
+);
+assert.deepEqual(
+  thinkingParams("https://api.xiaomimimo.com/v1", "high"),
+  { thinking: { type: "enabled" } },
+  "MiMo on → thinking.type enabled",
+);
+assert.equal(thinkingParams("https://api.deepseek.com", "off"), null, "未知/none 厂商不发思考字段");
+assert.equal(thinkingParams("https://api.xiaomimimo.com/v1", null), null, "thinking 空值不发");
 assert.equal(thinkingOptionsForCapability("levels").length, 4);
 assert.equal(thinkingOptionsForCapability("toggle").length, 2);
 assert.deepEqual(
@@ -75,7 +91,7 @@ assert.equal(resolveProvider(providers, "pA")?.apiKey, "ka");
       mainMinutes: 60,
       incrementSeconds: 60,
       red: { name: "红", providerId: "p1", model: "m", thinking: "off", contextTokens: 64000, maxOutputTokens: 4000 },
-      black: { name: "黑", providerId: "p1", model: "m2" },
+      black: { name: "黑", providerId: "p1", model: "m2", contextTokens: "", maxOutputTokens: "" },
     }),
   );
   const loaded = loadSettings();
@@ -103,6 +119,37 @@ assert.equal(resolveProvider(providers, "pA")?.apiKey, "ka");
   draft.red.model = "mutated";
   assert.equal(saved.red.model, "m1", "丢弃草稿不得改写已保存对象");
   assert.equal(settingsForStart({ dirty: false }).ok, true);
+}
+
+
+// 连通探测须显式 thinking=off，避免 MiMo 默认思考把 32 token 烧光
+{
+  const seen = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes("/models")) {
+      return new Response("nope", { status: 404 });
+    }
+    const body = JSON.parse(options.body);
+    seen.push(body);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "好" }, finish_reason: "stop" }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await testConnection({
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      apiKey: "k",
+      model: "mimo-v2",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].thinking, { type: "disabled" }, "探测对话必须带 disabled");
+    assert.equal(seen[0].max_tokens, 32);
+  } finally {
+    globalThis.fetch = prev;
+  }
 }
 
 console.log("settings logic ok");
