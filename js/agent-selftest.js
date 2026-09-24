@@ -117,7 +117,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.equal(match.traces.r[0].ply, 0, "日志条目必须带回合号");
 }
 
-// 2) 首轮被截断：不带半截分析重发；已在配置顶时翻倍夹住，不得谎称已放宽
+// 2) 首轮被截断：不带半截分析重发；固定配置 k，不得翻倍、不得说已放宽
 {
   const { match, outcome } = await play([
     reasoning("我在想……先比较一下马八进七和炮二平五，然后……", "length"),
@@ -125,12 +125,13 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   ]);
   assert.equal(outcome.kind, "move", "截断重试后应当能落子");
   assert.equal(outcome.iccs, "b0c2");
-  assert.deepEqual(caps(), [8000, 8000], "截断重试不得超过配置的输出上限");
+  assert.deepEqual(caps(), [8000, 8000], "截断重试必须保持同一配置 k，不得翻倍");
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截分析不许回灌历史");
   assert.match(requests[1].messages.at(-1).content, /截断/, "重发时要明确告知上一轮被截断");
+  assert.match(requests[1].messages.at(-1).content, /commit_move/, "截断重发须催促直接落子");
   const nudge = match.traces.r.map((item) => item.result || "").join(" ");
-  assert.match(nudge, /输出上限已是配置的 8k，只能催促直接落子/, "已在配置上限时不得谎称已放宽");
-  assert.equal(/已放宽/.test(nudge), false, "已在配置上限时日志不得出现「已放宽」");
+  assert.match(nudge, /输出上限已是配置的 8k，只能催促直接落子/, "固定 k 时须报配置上限");
+  assert.equal(/已放宽/.test(nudge), false, "固定 k 不得出现「已放宽」");
 }
 
 // 3) 连续被截断：有界重试后交裁判代走，不会把 8 步全烧在重试上
@@ -170,7 +171,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.match(requests[1].messages.find((message) => message.role === "tool").content, /非法着法/);
 }
 
-// 6) 截断后 capFloor 仍受配置顶约束：下一手也不会突破 maxOutputTokens
+// 6) 纯截断不写 capFloor（无抬限阶梯）；下一手仍用配置 k
 {
   const match = makeMatch();
   script = [reasoning("想很久", "length"), toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })];
@@ -178,11 +179,12 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   const first = await match.playTurn();
   assert.equal(first.kind, "move");
   assert.deepEqual(caps(), [8000, 8000]);
+  assert.equal(match.capFloor.r, 0, "截断重试不得写入抬限 capFloor");
   requests = [];
   script = [toolCall("commit_move", { move: "b0c2", thought: "马八进七" })];
   const second = await match.playTurn();
   assert.equal(second.kind, "move");
-  assert.deepEqual(caps(), [8000], "下一回合仍受配置输出上限约束");
+  assert.deepEqual(caps(), [8000], "下一回合仍用配置输出上限");
 }
 
 // 7) 厂商把过高的输出上限 400 拒掉时不许把整局打挂：压档后继续下
@@ -757,9 +759,9 @@ console.log("agent loop ok");
 }
 
 
-// 31) truncationNudgeText / truncationRetryPhase：文案互斥；已在上限 / 余量夹紧时不说「已放宽」
+// 31) truncationNudgeText / truncationRetryPhase：文案互斥；无「已放宽」分支；roomLimited 仍测
 {
-  const base = { truncations: 1, givingUp: false, hardCap: false, raised: false, roomLimited: false };
+  const base = { truncations: 1, givingUp: false, hardCap: false, roomLimited: false };
 
   const givingUp = truncationNudgeText({ ...base, truncations: 3, givingUp: true, cap: 32768, sendCap: 32768 });
   assert.equal(givingUp, "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。");
@@ -767,17 +769,13 @@ console.log("agent loop ok");
   const hard = truncationNudgeText({ ...base, hardCap: true, cap: 8192, sendCap: 8192 });
   assert.equal(hard, "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。");
 
-  const raised = truncationNudgeText({ ...base, raised: true, cap: 16000, sendCap: 8000 });
-  assert.equal(raised, "分析过长被截断未落子（第 1 次）。已放宽输出上限到 16k 并催促直接落子。");
-
   const ceiling = truncationNudgeText({ ...base, cap: 32000, sendCap: 32000 });
   assert.equal(ceiling, "分析过长被截断未落子（第 1 次）。输出上限已是配置的 32k，只能催促直接落子。");
   assert.equal(/已放宽/.test(ceiling), false);
 
-  // 上下文余量把实际 max_tokens 夹到配置顶以下：必须报 sendCap，且不得说已放宽（即使 raised）
+  // 上下文余量把实际 max_tokens 夹到配置顶以下：必须报 sendCap，且不得说已放宽
   const room = truncationNudgeText({
     ...base,
-    raised: true,
     roomLimited: true,
     cap: 32000,
     sendCap: 4000,
@@ -788,21 +786,20 @@ console.log("agent loop ok");
   );
   assert.equal(/已放宽/.test(room), false);
 
-  // givingUp / hardCap / roomLimited 优先于 raised
+  // givingUp / hardCap 优先于 roomLimited
   assert.equal(
-    truncationNudgeText({ ...base, truncations: 3, givingUp: true, hardCap: true, raised: true, roomLimited: true, cap: 8192, sendCap: 1000 }),
+    truncationNudgeText({ ...base, truncations: 3, givingUp: true, hardCap: true, roomLimited: true, cap: 8192, sendCap: 1000 }),
     "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。",
   );
   assert.equal(
-    truncationNudgeText({ ...base, hardCap: true, raised: true, roomLimited: true, cap: 8192, sendCap: 8192 }),
+    truncationNudgeText({ ...base, hardCap: true, roomLimited: true, cap: 8192, sendCap: 8192 }),
     "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。",
   );
 
   assert.equal(truncationRetryPhase({ ...base, hardCap: true, cap: 8192, sendCap: 8192 }), "重试 · 输出被截断（上限 8k 硬顶）");
-  assert.equal(truncationRetryPhase({ ...base, raised: true, cap: 16000, sendCap: 8000 }), "重试 · 输出超长被截断（上限 16k）");
   assert.equal(truncationRetryPhase({ ...base, cap: 32000, sendCap: 32000 }), "重试 · 输出被截断（已是配置上限 32k）");
   assert.equal(
-    truncationRetryPhase({ ...base, raised: true, roomLimited: true, cap: 32000, sendCap: 4000 }),
+    truncationRetryPhase({ ...base, roomLimited: true, cap: 32000, sendCap: 4000 }),
     "重试 · 输出被截断（实际上限 4k，上下文余量）",
   );
 }
@@ -821,9 +818,9 @@ console.log("agent loop ok");
   assert.ok(reasoningPart.replace("…", "").length <= DIGEST_REASONING_CLIP + 5);
 }
 
-// 33) 起始 cap=baseCap(32k) 时截断「翻倍」抬不上去：三次请求都是 32k（设计气味，非本次改动）
+// 33) 固定配置 k=32k：截断重试三次请求都是同一 k，不得翻倍阶梯
 {
-  const { outcome } = await play(
+  const { match, outcome } = await play(
     [
       reasoning("烧一", "length"),
       reasoning("烧二", "length"),
@@ -833,7 +830,46 @@ console.log("agent loop ok");
     32768,
   );
   assert.deepEqual(outcome, { kind: "random", reason: "输出连续被截断，裁判代走" });
-  assert.deepEqual(caps(), [32768, 32768, 32768], "已在配置顶时翻倍无效，每次仍邀满额 completion");
+  assert.deepEqual(caps(), [32768, 32768, 32768], "截断重试始终用配置的固定 k");
+  const nudge = match.traces.r.map((item) => item.result || "").join(" ");
+  assert.equal(/已放宽/.test(nudge), false, "固定 k 日志不得出现「已放宽」");
+}
+
+// 35) 厂商压档写入 capFloor 后：截断重试仍保持该档，绝不翻倍抬向 baseCap（旧翻倍行为会 4k→8k）
+{
+  const match = makeMatch(32000);
+  match.capFloor.r = 4000;
+  script = [
+    reasoning("半截", "length"),
+    toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
+  ];
+  requests = [];
+  const outcome = await match.playTurn();
+  assert.equal(outcome.kind, "move");
+  assert.deepEqual(caps(), [4000, 4000], "截断不得翻倍：须保持厂商可用档位");
+  const nudge = match.traces.r.map((item) => item.result || "").join(" ");
+  assert.equal(/已放宽/.test(nudge), false);
+  assert.match(nudge, /硬顶|只能催/, "低于配置顶时应走硬顶/催促文案");
+}
+
+// 36) 厂商 400 拒收后记住可用档：下一手从该档起步，不回满配置顶去再撞墙
+{
+  script = [
+    httpError(400, "max_tokens is too large: 32768"),
+    toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
+  ];
+  requests = [];
+  const match = makeMatch(32768);
+  const first = await match.playTurn();
+  assert.equal(first.kind, "move");
+  assert.equal(caps()[0], 32768);
+  assert.equal(caps()[1], 8192);
+  assert.equal(match.capFloor.r, 8192, "应记住厂商肯收的档位");
+  requests = [];
+  script = [toolCall("commit_move", { move: "b0c2", thought: "马八进七" })];
+  const second = await match.playTurn();
+  assert.equal(second.kind, "move");
+  assert.deepEqual(caps(), [8192], "下一回合从记住的厂商档起步");
 }
 
 // 34) 压缩路径必须显式 thinking=off，小米 MiMo 出站带 type=disabled（thinking:null 会默认开思考）

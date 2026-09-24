@@ -40,14 +40,13 @@ function configuredOutputCap(player) {
   return Math.max(256, Math.min(out, ctx));
 }
 
-/** 截断重试时裁判日志文案。
+/** 截断重试时裁判日志文案（固定配置 k，不翻倍抬限）。
  * - givingUp / hardCap：原语义
- * - roomLimited：本请求实际 max_tokens（sendCap）低于当时配置 cap（上下文余量夹紧），不说「已放宽」
- * - raised：配置 cap 真的抬高了，且本次并非余量夹紧
- * - else：已在配置顶
- * sendCap 为触发截断的那次请求实际下发的 max_tokens；cap 为抬限尝试之后的配置软顶。
+ * - roomLimited：本请求实际 max_tokens（sendCap）低于当时配置 cap（上下文余量夹紧）
+ * - else：已在当前可用上限（配置顶，或厂商压档后的硬顶）
+ * sendCap 为触发截断的那次请求实际下发的 max_tokens；cap 为当前可用输出上限。
  */
-export function truncationNudgeText({ truncations, givingUp, hardCap, raised, cap, sendCap, roomLimited }) {
+export function truncationNudgeText({ truncations, givingUp, hardCap, cap, sendCap, roomLimited }) {
   const k = Math.round(Number(cap) / 1000);
   const sk = Math.round(Number(sendCap ?? cap) / 1000);
   if (givingUp) {
@@ -59,19 +58,15 @@ export function truncationNudgeText({ truncations, givingUp, hardCap, raised, ca
   if (roomLimited) {
     return `分析过长被截断未落子（第 ${truncations} 次）。本请求实际输出上限 ${sk}k（配置 ${k}k，受上下文余量限制），只能催促直接落子。`;
   }
-  if (raised) {
-    return `分析过长被截断未落子（第 ${truncations} 次）。已放宽输出上限到 ${k}k 并催促直接落子。`;
-  }
   return `分析过长被截断未落子（第 ${truncations} 次）。输出上限已是配置的 ${k}k，只能催促直接落子。`;
 }
 
-/** 截断重试时的 phase 文案：余量夹紧 / 未抬高时不暗示「放宽」 */
-export function truncationRetryPhase({ hardCap, raised, cap, sendCap, roomLimited }) {
+/** 截断重试时的 phase 文案：固定 k，不暗示「放宽」 */
+export function truncationRetryPhase({ hardCap, cap, sendCap, roomLimited }) {
   const k = Math.round(Number(cap) / 1000);
   const sk = Math.round(Number(sendCap ?? cap) / 1000);
   if (hardCap) return `重试 · 输出被截断（上限 ${sk}k 硬顶）`;
   if (roomLimited) return `重试 · 输出被截断（实际上限 ${sk}k，上下文余量）`;
-  if (raised) return `重试 · 输出超长被截断（上限 ${k}k）`;
   return `重试 · 输出被截断（已是配置上限 ${k}k）`;
 }
 
@@ -548,7 +543,7 @@ export class Match {
     this.running = false;
     this.timer = 0;
     this.emitTimer = 0;
-    // 被截断过的模型不用每回合重新学一遍：把抬高过的输出上限记在手上，下回合直接从这里起步
+    // 厂商拒绝过高 max_tokens 后记住可用档位，下回合直接从这里起步（不超过配置顶）；截断本身不抬限
     this.capFloor = { r: 0, b: 0 };
     // 该接口是否要求把推理原文回传（DeepSeek 官方带 tools 时要求），见 reasoningRejected
     this.echoReasoning = false;
@@ -868,7 +863,8 @@ export class Match {
     this.tracePly[side] = turnPly;
     const baseCap = configuredOutputCap(player);
     let cap = Math.min(baseCap, this.capFloor[side] > 0 ? this.capFloor[side] : baseCap);
-    let hardCap = false; // 厂商拒过抬高后的上限：本回合不再抬
+    // 已因厂商拒收而低于配置顶：文案走硬顶；截断不会翻倍抬回 baseCap
+    let hardCap = cap < baseCap;
     this.traces[side] = [];
     this.preview = null;
     this.phase[side] = "请求中";
@@ -945,9 +941,8 @@ export class Match {
     let failures = 0;
     let truncations = 0;
 
-    // 输出被上限截断不是模型违规，也不是策略问题：半截文本/半截参数一律不回灌历史
-    // （只会让下一次请求更长更慢、更像在自我重复），尝试在配置上限内翻倍后重发。
-    // 注意：若本回合一开始就已是 baseCap（默认 32k），翻倍会被夹住、实际抬不上去——
+    // 输出被上限截断不是模型违规：半截文本/半截参数一律不回灌历史，
+    // 催促直接 commit_move 后按固定配置 k（baseCap，或厂商压档后的 cap）重发——不翻倍、不软启阶梯。
     // 思考默认开时单次即可烧光 max_tokens，连续截断最多约 1+MAX_TRUNCATIONS 次全额 completion。
     // 返回 null 表示已重发，返回对象表示该用裁判代走收场。
     let lastSendCap = cap;
@@ -955,22 +950,12 @@ export class Match {
       truncations += 1;
       const givingUp = truncations > MAX_TRUNCATIONS;
       const hitSendCap = lastSendCap;
-      const capBefore = cap;
-      let raised = false;
-      if (!hardCap) {
-        // 不超过配置的输出上限，也不超过上下文窗；只有真的抬高了才说「已放宽」
-        const next = Math.min(cap * 2, baseCap);
-        raised = next > cap;
-        cap = next;
-        this.capFloor[side] = cap;
-      }
-      // 触发截断的那次请求：sendCap = min(capBefore, room)。余量夹紧时抬配置顶也救不了当次上限。
-      const roomLimited = hitSendCap < capBefore;
+      // 固定 k：截断不改 cap。sendCap = min(cap, room)；余量夹紧时如实报 roomLimited。
+      const roomLimited = hitSendCap < cap;
       const nudgeArgs = {
         truncations,
         givingUp,
         hardCap,
-        raised,
         cap,
         sendCap: hitSendCap,
         roomLimited,
@@ -1060,16 +1045,15 @@ export class Match {
           },
         });
       } catch (error) {
-        // 输出上限被厂商拒了（400）：本轮不再抬，压到厂商肯收的档位重发。
-        // 抬高被拒就退回已知可用的基准上限；基准上限本身被拒（用户配得比模型上限还大）就往下压，
-        // 不能让它一路抛成"中断"把整局终结掉。
+        // 输出上限被厂商拒了（400）：压到厂商肯收的档位重发（8192 / 半档），记住该档供下回合起步。
+        // 这不是软启阶梯，只是扛住 400；不能让它一路抛成"中断"把整局终结掉。
         if (capRejected(error)) {
           const rejected = cap;
           const next = cap > baseCap ? baseCap : cap > 8192 ? 8192 : Math.floor(cap / 2);
           if (next >= 1024 && next < cap) {
             hardCap = true;
             cap = next;
-            this.capFloor[side] = 0;
+            this.capFloor[side] = next;
             traceAdd(trace, {
               id: `nudge-${step}`,
               ply: turnPly,
@@ -1158,7 +1142,7 @@ export class Match {
         continue;
       }
 
-      // 工具调用被上限掐在半截 JSON 上时，同上：不算违规，抬高上限重发
+      // 工具调用被上限掐在半截 JSON 上时，同上：不算违规，固定 k 催促重发
       if (acc.finishReason === "length" && calls.every((call) => parseArgs(call.arguments) === null)) {
         const stop = truncationRetry(step, trace);
         if (stop) return stop;
