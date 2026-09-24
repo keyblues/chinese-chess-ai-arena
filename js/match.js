@@ -2,6 +2,7 @@ import {
   applyMove,
   asciiBoard,
   inCheck,
+  pieceChar,
   legalMoves,
   opposite,
   parseIcCS,
@@ -45,30 +46,226 @@ function traceAdd(trace, entry) {
   return entry;
 }
 
-function systemPrompt(side) {
+export function systemPrompt(side) {
   const name = sideName(side);
   return [
     `你是中国象棋智能体，本局执${name}。裁判在本地，你不能用文字宣称已经走子。`,
-    "每步消息都会附上全部合法着法：比较后直接调用 commit_move 提交其中一步，move 必须逐字来自该列表。",
-    "需要复核盘面时才调用 look_board 或 legal_moves，不要重复查询。",
-    "分析不超过 150 字：从合法着法中选定一步，立即 commit_move，不要长篇推演。",
+    "每步消息都会附上当前盘面、双方子力与全部合法着法；move 必须逐字来自该合法着法列表。",
+    "look_board / legal_moves 仍可调用，但盘面与合法着法已附上，一般不必重复查询。",
+    "请先在合法着法中寻找将军与吃子，尤其是将杀进攻以及对己方将/帅的威胁；再考虑防守与计划；想清楚后调用 commit_move 提交。",
     "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选；连续多次违规或未落子时，裁判会从合法着法中随机代走一步（不会因此判负）。",
     "胜负由裁判裁定：将死、困毙、认输、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
   ].join("\n");
 }
 
-function turnPrompt(pos, records) {
+const PIECE_TYPE_ORDER = ["K", "A", "B", "N", "R", "C", "P"];
+
+export function piecesSummary(pos) {
+  const summarize = (side) => {
+    const groups = {};
+    for (let rank = 0; rank < 10; rank += 1) {
+      for (let file = 0; file < 9; file += 1) {
+        const cell = pos.board[rank][file];
+        if (!cell || cell.side !== side) continue;
+        if (!groups[cell.type]) groups[cell.type] = { name: pieceChar(cell), squares: [] };
+        groups[cell.type].squares.push(`${"abcdefghi"[file]}${rank}`);
+      }
+    }
+    const parts = PIECE_TYPE_ORDER.filter((type) => groups[type]).map((type) => {
+      const group = groups[type];
+      return group.squares.length === 1
+        ? `${group.name}${group.squares[0]}`
+        : `${group.name}×${group.squares.length}（${group.squares.join("、")}）`;
+    });
+    return `${sideName(side)}：${parts.join(" ") || "无子"}`;
+  };
+  return `${summarize("r")}\n${summarize("b")}`;
+}
+
+export function buildTurnUserMessage(pos, records, legal) {
   const round = Math.floor(records.length / 2) + 1;
-  const recent = records
-    .slice(-8)
-    .map((item) => item.notation)
-    .join(" ");
+  const last = records.length ? records[records.length - 1] : null;
+  const legalLines = legal.map((move) => `${move.iccs} ${toNotation(pos, move)}`).join("\n");
+  const opponentLine = last
+    ? `对方上一手：${last.notation}（${last.iccs}）${last.substitute ? " · 裁判代走" : ""}${last.thought ? `；想法：${last.thought}` : ""}`
+    : "这是开局第一步。";
   return [
     `第 ${round} 回合，轮到${sideName(pos.side)}。`,
-    recent ? `最近着法：${recent}` : "这是开局第一步。",
+    opponentLine,
+    `被将军：${inCheck(pos, pos.side) ? "是" : "否"}`,
     `距上次吃子 ${pos.halfmove} 步。`,
-    "请调用工具完成本步。不要只输出文字。",
+    `FEN：${toFEN(pos)}`,
+    "双方子力：",
+    piecesSummary(pos),
+    "棋盘（文件 a-i，行号即 ICCS 的数字）：",
+    asciiBoard(pos),
+    "",
+    "全部合法着法（ICCS + 中文记谱），从中选择一步提交：",
+    legalLines || "（无）",
+    "请调用 commit_move 提交，或 resign 认输。不要只输出文字。",
   ].join("\n");
+}
+
+function collapseTurnUserContent(content, turnPly) {
+  const text = String(content || "");
+  if (!text.includes("棋盘（文件") && !text.includes("全部合法着法")) return text;
+  const round = Math.floor(Number(turnPly) / 2) + 1;
+  const keep = text
+    .split("\n")
+    .filter((line) => /^(第\s*\d+|对方上一手|被将军|距上次吃子|FEN：)/.test(line.trim()))
+    .slice(0, 5);
+  return `${keep.join("\n")}\n（第${round}回合盘面与合法着法已省略）`;
+}
+
+export function collapseOldMemory(messages) {
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message.role === "user" && message._meta?.kind === "turn" && message._meta.full) {
+      messages[i] = {
+        ...message,
+        content: collapseTurnUserContent(message.content, message._meta.turnPly ?? 0),
+        _meta: { ...message._meta, full: false },
+      };
+    }
+    if (message.role === "tool" && (message.name === "look_board" || message.name === "legal_moves")) {
+      const body = String(message.content || "");
+      if (body.length > 100 || body.includes("棋盘") || /^\s*共\s*\d+\s*着/m.test(body)) {
+        messages[i] = { ...message, content: "（盘面/合法着法查询结果已省略）" };
+      }
+    }
+  }
+  return messages;
+}
+
+function packMemory(messages) {
+  return (messages || []).map((message) => {
+    const packed = { role: message.role, content: clip(message.content, 2400) };
+    if (message.name) packed.name = message.name;
+    if (message.tool_call_id) packed.tool_call_id = message.tool_call_id;
+    if (message.tool_calls) packed.tool_calls = message.tool_calls;
+    if (typeof message.reasoning_content === "string") packed.reasoning_content = clip(message.reasoning_content, 800);
+    if (message._meta) packed._meta = { ...message._meta, full: false };
+    return packed;
+  });
+}
+
+export function rebuildMemoryFromRecords(side, records) {
+  const messages = [{ role: "system", content: systemPrompt(side) }];
+  (records || []).forEach((record, index) => {
+    if (record.side !== side) return;
+    const turnPly = index;
+    messages.push({
+      role: "user",
+      content: `（第${Math.floor(turnPly / 2) + 1}回合盘面已省略；你走了 ${record.iccs} ${record.notation}${record.substitute ? " · 裁判代走" : ""}。想法：${record.thought || "无"}）`,
+      _meta: { kind: "turn", turnPly, full: false },
+    });
+    if (record.substitute) {
+      messages.push({
+        role: "user",
+        content: `（裁判代走）因模型未有效落子，裁判替你走了 ${record.iccs} ${record.notation}。`,
+        _meta: { kind: "substitute", turnPly },
+      });
+      return;
+    }
+    const callId = `restored_${side}_${turnPly}_${record.iccs}`;
+    messages.push({
+      role: "assistant",
+      content: record.thought || "",
+      tool_calls: [
+        {
+          id: callId,
+          type: "function",
+          function: {
+            name: "commit_move",
+            arguments: JSON.stringify({ move: record.iccs, thought: record.thought || "" }),
+          },
+        },
+      ],
+    });
+    messages.push({
+      role: "tool",
+      tool_call_id: callId,
+      name: "commit_move",
+      content: `已接受 ${record.iccs} ${record.notation}`,
+    });
+  });
+  return messages;
+}
+
+function sanitizeToolProtocol(messages) {
+  const result = [];
+  let pending = new Set();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      const calls = message.tool_calls || [];
+      pending = new Set(calls.map((call) => call.id).filter(Boolean));
+      result.push(message);
+      continue;
+    }
+    if (message.role === "tool") {
+      if (pending.has(message.tool_call_id)) {
+        result.push(message);
+        pending.delete(message.tool_call_id);
+      }
+      continue;
+    }
+    if (pending.size && result.length) {
+      const last = result[result.length - 1];
+      if (last.role === "assistant" && last.tool_calls?.length) {
+        const kept = last.tool_calls.filter((call) => !pending.has(call.id));
+        if (!kept.length) {
+          const { tool_calls, ...rest } = last;
+          result[result.length - 1] = rest;
+        } else if (kept.length !== last.tool_calls.length) {
+          result[result.length - 1] = { ...last, tool_calls: kept };
+        }
+      }
+    }
+    pending = new Set();
+    result.push(message);
+  }
+  if (pending.size && result.length) {
+    const last = result[result.length - 1];
+    if (last.role === "assistant" && last.tool_calls?.length) {
+      const kept = last.tool_calls.filter((call) => !pending.has(call.id));
+      if (!kept.length) {
+        const { tool_calls, ...rest } = last;
+        result[result.length - 1] = rest;
+      } else {
+        result[result.length - 1] = { ...last, tool_calls: kept };
+      }
+    }
+  }
+  return result;
+}
+
+function findCurrentTurnStart(list) {
+  for (let i = list.length - 1; i >= 1; i -= 1) {
+    if (list[i].role === "user" && list[i]._meta?.kind === "turn") return i;
+  }
+  for (let i = list.length - 1; i >= 1; i -= 1) {
+    if (list[i].role === "user") return i;
+  }
+  return Math.min(1, Math.max(0, list.length - 1));
+}
+
+function dropOldestTurn(list, currentStart) {
+  if (currentStart <= 1) return list;
+  let start = -1;
+  for (let i = 1; i < currentStart; i += 1) {
+    if (list[i].role === "user") {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return list;
+  let end = start + 1;
+  while (end < currentStart) {
+    const message = list[end];
+    if (message.role === "user" && (message._meta?.kind === "turn" || message._meta?.kind === "substitute")) break;
+    end += 1;
+  }
+  return sanitizeToolProtocol([list[0], ...list.slice(end)]);
 }
 
 function parseArgs(text) {
@@ -229,6 +426,15 @@ export class Match {
     this.echoReasoning = false;
     // 厂商不认思考强度字段时整局不再发，见 thinkingRejected
     this.dropThinking = false;
+    // 双方跨回合会话：系统提示只放一次，此后追加每手的盘面与工具往返
+    this.memory = {
+      r: Array.isArray(saved?.memory?.r) && saved.memory.r.length
+        ? saved.memory.r
+        : rebuildMemoryFromRecords("r", this.records),
+      b: Array.isArray(saved?.memory?.b) && saved.memory.b.length
+        ? saved.memory.b
+        : rebuildMemoryFromRecords("b", this.records),
+    };
   }
 
   providerOf(side) {
@@ -306,11 +512,15 @@ export class Match {
   }
 
   persist() {
-    this.hooks.onPersist(this.serialize());
+    const full = this.serialize();
+    const ok = this.hooks.onPersist?.(full);
+    if (ok === false) {
+      this.hooks.onPersist?.(this.serialize({ omitMemory: true }));
+    }
   }
 
-  serialize() {
-    return {
+  serialize(options = {}) {
+    const data = {
       id: this.id,
       startedAt: this.startedAt,
       temperature: this.temperature,
@@ -334,6 +544,25 @@ export class Match {
       tracePly: { ...this.tracePly },
       result: this.result,
     };
+    if (!options.omitMemory) {
+      data.memory = {
+        r: packMemory(collapseOldMemory(this.memory.r.map((item) => ({ ...item })))),
+        b: packMemory(collapseOldMemory(this.memory.b.map((item) => ({ ...item })))),
+      };
+    }
+    return data;
+  }
+
+  appendSubstituteNote(side, move, reason, notation) {
+    if (!this.memory[side]?.length) {
+      this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
+    }
+    const turnPly = Math.max(0, this.records.length - 1);
+    this.memory[side].push({
+      role: "user",
+      content: `（裁判代走）因「${reason || "模型未落子"}」，裁判替你走了 ${move.iccs} ${notation}。请在后续回合基于此局面继续。`,
+      _meta: { kind: "substitute", turnPly },
+    });
   }
 
   start() {
@@ -455,6 +684,7 @@ export class Match {
             thought: `裁判代走（${reason}）`,
             substitute: true,
           });
+          this.appendSubstituteNote(side, move, reason, notation);
           const after = resolveAfterMove(this.pos, this.records, this.positions);
           if (after) {
             this.finish(after);
@@ -486,14 +716,20 @@ export class Match {
     if (!this.turnStarted) this.turnStarted = Date.now();
     this.emit();
 
-    const legalLines = legal.map((move) => `${move.iccs} ${toNotation(this.pos, move)}`).join("\n");
-    const messages = [
-      { role: "system", content: systemPrompt(side) },
-      {
-        role: "user",
-        content: `${turnPrompt(this.pos, this.records)}\n\n全部合法着法（ICCS + 中文记谱），从中选择一步提交：\n${legalLines}`,
-      },
-    ];
+    if (!this.memory[side]?.length) {
+      this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
+    }
+    collapseOldMemory(this.memory[side]);
+    const turnUser = {
+      role: "user",
+      content: buildTurnUserMessage(this.pos, this.records, legal),
+      _meta: { kind: "turn", turnPly, full: true },
+    };
+    // 本回合在工作副本上推进：截断半截输出仍不回灌；成功或代走后再写回长期记忆
+    const messages = [...this.memory[side], turnUser];
+    const commitMemory = () => {
+      this.memory[side] = messages.map((item) => ({ ...item }));
+    };
     let failures = 0;
     let truncations = 0;
 
@@ -524,6 +760,7 @@ export class Match {
       if (givingUp) {
         this.phase[side] = "输出连续被截断";
         this.emit();
+        commitMemory();
         return { kind: "random", reason: "输出连续被截断，裁判代走" };
       }
       this.phase[side] = hardCap
@@ -554,7 +791,7 @@ export class Match {
           baseUrl: this.providerOf(side).baseUrl,
           apiKey: this.providerOf(side).apiKey,
           model: player.model,
-          messages: trimMessages(messages, player.contextTokens, this.echoReasoning),
+          messages: trimMessages(messages, player.contextTokens, this.echoReasoning, cap),
           tools: TOOLS,
           temperature: this.temperature,
           maxTokens: cap,
@@ -672,6 +909,7 @@ export class Match {
         this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · 未调用工具`;
         if (failures >= MAX_FAILURES) {
           this.emit();
+          commitMemory();
           return { kind: "random", reason: "连续未调用工具，裁判代走" };
         }
         messages.push({
@@ -726,13 +964,20 @@ export class Match {
           finished = executed.outcome;
           break;
         }
-        if (failures >= MAX_FAILURES) return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
+        if (failures >= MAX_FAILURES) {
+          commitMemory();
+          return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
+        }
       }
-      if (finished) return finished;
+      if (finished) {
+        commitMemory();
+        return finished;
+      }
       if (step >= 2) {
-        messages.push({ role: "user", content: "信息已经足够。请立刻调用 commit_move 或 resign，不要再重复查询。" });
+        messages.push({ role: "user", content: "盘面信息已经足够。请选定一步，调用 commit_move 或 resign，不必再重复查询。" });
       }
     }
+    commitMemory();
     return { kind: "random", reason: "多轮未落子，裁判代走" };
   }
 
@@ -871,7 +1116,7 @@ function messagesTokens(messages) {
 // 轮内对话逼近模型上下文时，先丢推理原文，再从最旧的一组（assistant + 其 tool 结果）开始丢。
 // echoReasoning 为真（该接口要求回传推理原文）时反过来：每条 assistant 都补齐这个字段（没有推理也要空串），
 // 只按上下文预算丢旧组。
-function trimMessages(messages, contextTokens, echoReasoning = false) {
+export function trimMessages(messages, contextTokens, echoReasoning = false, maxOutputTokens = 0) {
   let list = messages.map((message) => {
     if (message.role !== "assistant") return message;
     if (echoReasoning) {
@@ -879,13 +1124,20 @@ function trimMessages(messages, contextTokens, echoReasoning = false) {
     }
     return message.reasoning_content ? { ...message, reasoning_content: undefined } : message;
   });
-  const budget = Math.max(4096, Math.floor((Number(contextTokens) || 128000) * 0.7));
-  while (list.length > 2 && messagesTokens(list) > budget) {
-    let end = 3;
-    while (end < list.length && list[end].role === "tool") end += 1;
-    list = [list[0], list[1], ...list.slice(end)];
+  const ctx = Number(contextTokens) || 128000;
+  const reservedOut = Math.max(0, Number(maxOutputTokens) || 0);
+  // 扣掉本回合输出上限，避免 context+max_tokens 顶满整窗被 400
+  const budget = Math.max(2048, Math.floor((ctx - reservedOut) * 0.7));
+  let guard = 0;
+  while (messagesTokens(list) > budget && list.length > 2 && guard < 64) {
+    guard += 1;
+    const currentStart = findCurrentTurnStart(list);
+    if (currentStart <= 1) break;
+    const next = dropOldestTurn(list, currentStart);
+    if (next.length >= list.length) break;
+    list = next;
   }
-  return list;
+  return sanitizeToolProtocol(list);
 }
 
 function previewMove(call, legalMap) {
