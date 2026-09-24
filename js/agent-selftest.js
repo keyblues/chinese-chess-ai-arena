@@ -254,6 +254,14 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.equal(zhipu.kind, "move");
   assert.deepEqual(requests[0].thinking, { type: "disabled" }, "智谱用 thinking 字段");
 
+  const { outcome: mimoOff } = await play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://api.xiaomimimo.com/v1", "off");
+  assert.equal(mimoOff.kind, "move");
+  assert.deepEqual(requests[0].thinking, { type: "disabled" }, "小米 MiMo 关思考必须显式 disabled（默认会开思考烧光输出）");
+
+  const { outcome: mimoOn } = await play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://api.xiaomimimo.com/v1", "high");
+  assert.equal(mimoOn.kind, "move");
+  assert.deepEqual(requests[0].thinking, { type: "enabled" }, "小米 MiMo 开思考发 enabled");
+
   const { outcome: plain } = await play([toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })], 8000, "https://api.deepseek.com", "high");
   assert.equal(plain.kind, "move");
   assert.equal("reasoning" in requests[0] || "thinking" in requests[0] || "enable_thinking" in requests[0], false);

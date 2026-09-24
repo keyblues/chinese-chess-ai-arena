@@ -67,7 +67,8 @@ export function thinkingParams(baseUrl, thinking) {
   if (host.includes("siliconflow.cn") || host.includes("dashscope") || host.includes("aliyuncs.com")) {
     return { enable_thinking: level !== "off" };
   }
-  if (host.includes("moonshot.cn")) {
+  if (host.includes("moonshot.cn") || host.includes("xiaomimimo.com")) {
+    // 小米 MiMo：thinking 默认 enabled；UI「关」必须显式 type=disabled，否则推理烧光 max_tokens
     return { thinking: { type: level === "off" ? "disabled" : "enabled" } };
   }
   return null;

@@ -49,7 +49,7 @@ export function discardSettingsDraft(saved) {
 /**
  * 按 Base URL 判断思考强度实际能力：
  * - levels: OpenRouter（off/low/medium/high）
- * - toggle: 智谱 / Kimi / SiliconFlow 等（仅开/关）
+ * - toggle: 智谱 / Kimi / SiliconFlow / 小米 MiMo 等（仅开/关；MiMo 默认开思考，关必须显式 disabled）
  * - none: 不发送该参数（如 DeepSeek）
  */
 export function thinkingCapability(baseUrl) {
@@ -62,6 +62,7 @@ export function thinkingCapability(baseUrl) {
     || host.includes("siliconflow.cn")
     || host.includes("dashscope")
     || host.includes("aliyuncs.com")
+    || host.includes("xiaomimimo.com")
   ) {
     return "toggle";
   }

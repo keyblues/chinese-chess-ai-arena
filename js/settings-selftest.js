@@ -10,7 +10,7 @@ import {
   settingsForStart,
   discardSettingsDraft,
 } from "./settings-logic.js";
-import { testConnection } from "./llm.js";
+import { testConnection, thinkingParams } from "./llm.js";
 import { loadSettings, saveSettings, DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 assert.equal(escapeAttr(`a"b'<c>`), "a&quot;b&#39;&lt;c&gt;");
@@ -29,6 +29,22 @@ assert.equal(thinkingCapability("https://open.bigmodel.cn/api/paas/v4"), "toggle
 assert.equal(thinkingCapability("https://api.moonshot.cn/v1"), "toggle");
 assert.equal(thinkingCapability("https://api.siliconflow.cn/v1"), "toggle");
 assert.equal(thinkingCapability("https://api.deepseek.com"), "none");
+assert.equal(thinkingCapability("https://api.xiaomimimo.com/v1"), "toggle", "小米 MiMo 可开关思考");
+assert.equal(thinkingCapability("https://api.xiaomimimo.com/v1/"), "toggle");
+assert.equal(normalizeThinkingValue("off", thinkingCapability("https://api.xiaomimimo.com/v1")), "off");
+assert.equal(normalizeThinkingValue("high", thinkingCapability("https://api.xiaomimimo.com/v1")), "high");
+assert.deepEqual(
+  thinkingParams("https://api.xiaomimimo.com/v1", "off"),
+  { thinking: { type: "disabled" } },
+  "MiMo off → thinking.type disabled",
+);
+assert.deepEqual(
+  thinkingParams("https://api.xiaomimimo.com/v1", "high"),
+  { thinking: { type: "enabled" } },
+  "MiMo on → thinking.type enabled",
+);
+assert.equal(thinkingParams("https://api.deepseek.com", "off"), null, "未知/none 厂商不发思考字段");
+assert.equal(thinkingParams("https://api.xiaomimimo.com/v1", null), null, "thinking 空值不发");
 assert.equal(thinkingOptionsForCapability("levels").length, 4);
 assert.equal(thinkingOptionsForCapability("toggle").length, 2);
 assert.deepEqual(
