@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node js/selftest.js && node js/agent-selftest.js"
+    "test": "node js/selftest.js && node js/agent-selftest.js && node js/settings-selftest.js"
   }
 }

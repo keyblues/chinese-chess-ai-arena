@@ -1,5 +1,12 @@
 import { resultText } from "./match.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
+import {
+  escapeAttr,
+  insecureBaseUrlWarning,
+  thinkingCapability,
+  thinkingOptionsForCapability,
+  normalizeThinkingValue,
+} from "./settings-logic.js";
 
 // 横置棋盘：黑在上手（左），红在下手（右）。
 // 列 = 纵线（由 9 路…0 路自左向右），行 = 文件线（a…i 自上而下）。
@@ -108,10 +115,7 @@ function clockText(ms) {
 }
 
 function escapeText(value) {
-  return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return escapeAttr(value);
 }
 
 // 行棋日志的排序键：回合（ply）→ 步序（step）→ 条目类型（思维链/输出/工具/裁判）→ 同一步内的调用序号。
@@ -548,22 +552,66 @@ export function createUI(callbacks) {
     const row = document.createElement("div");
     row.className = "provider-row";
     row.dataset.id = provider.id || "";
-    row.innerHTML = `
-      <input class="pr-name" placeholder="名称" />
-      <input class="pr-url" placeholder="接口地址，如 https://openrouter.ai/api/v1" />
-      <input class="pr-key" type="password" placeholder="API Key" autocomplete="off" />
-      <button class="ghost-btn pr-del" type="button" title="删除该供应商">删</button>`;
-    row.querySelector(".pr-name").value = provider.name || "";
-    row.querySelector(".pr-url").value = provider.baseUrl || "";
-    row.querySelector(".pr-key").value = provider.apiKey || "";
-    row.querySelector(".pr-del").addEventListener("click", () => {
+    const name = document.createElement("input");
+    name.className = "pr-name";
+    name.placeholder = "名称";
+    name.value = provider.name || "";
+    const url = document.createElement("input");
+    url.className = "pr-url";
+    url.placeholder = "https://openrouter.ai/api/v1";
+    url.value = provider.baseUrl || "";
+    const keyWrap = document.createElement("div");
+    keyWrap.className = "pr-key-wrap";
+    const key = document.createElement("input");
+    key.className = "pr-key";
+    key.type = "password";
+    key.placeholder = "API Key";
+    key.autocomplete = "off";
+    key.value = provider.apiKey || "";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "ghost-btn pr-toggle-key";
+    toggle.textContent = "显示";
+    toggle.title = "显示/隐藏密钥";
+    toggle.addEventListener("click", () => {
+      const show = key.type === "password";
+      key.type = show ? "text" : "password";
+      toggle.textContent = show ? "隐藏" : "显示";
+    });
+    keyWrap.append(key, toggle);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost-btn pr-del";
+    del.title = "删除该供应商";
+    del.textContent = "删";
+    del.addEventListener("click", () => {
       if (document.querySelectorAll(".provider-row").length <= 1) {
         toast("至少保留一个供应商");
         return;
       }
       row.remove();
       refreshProviderOptions();
+      refreshThinkingOptions();
+      markDirty();
     });
+    const meta = document.createElement("div");
+    meta.className = "provider-meta";
+    const warn = document.createElement("span");
+    warn.className = "field-warn";
+    warn.hidden = true;
+    meta.append(warn);
+    const syncWarn = () => {
+      const message = insecureBaseUrlWarning(url.value);
+      warn.textContent = message || "";
+      warn.hidden = !message;
+    };
+    url.addEventListener("input", syncWarn);
+    url.addEventListener("change", () => {
+      syncWarn();
+      refreshThinkingOptions();
+    });
+    syncWarn();
+    row.append(name, url, keyWrap, del, meta);
     return row;
   }
 
@@ -577,7 +625,7 @@ export function createUI(callbacks) {
           id: row.dataset.id,
           name: row.querySelector(".pr-name").value.trim(),
           baseUrl: row.querySelector(".pr-url").value.trim(),
-          apiKey: row.querySelector(".pr-key").value.trim(),
+          apiKey: (row.querySelector(".pr-key")?.value || "").trim(),
         };
       })
       .filter((provider) => provider.baseUrl || provider.apiKey || provider.name);
@@ -588,10 +636,52 @@ export function createUI(callbacks) {
     ["red", "black"].forEach((side) => {
       const select = document.querySelector(`#${side}-provider`);
       const current = select.value;
-      select.innerHTML = providers
-        .map((provider, index) => `<option value="${escapeText(provider.id)}">${escapeText(provider.name || `供应商 ${index + 1}`)}</option>`)
-        .join("");
-      if (providers.some((provider) => provider.id === current)) select.value = current;
+      select.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "请选择供应商";
+      select.append(placeholder);
+      providers.forEach((provider, index) => {
+        const option = document.createElement("option");
+        option.value = provider.id;
+        option.textContent = provider.name || `供应商 ${index + 1}`;
+        select.append(option);
+      });
+      if (current && providers.some((provider) => provider.id === current)) select.value = current;
+      else select.value = "";
+    });
+  }
+
+  function providerBaseUrlForSide(side) {
+    const id = document.querySelector(`#${side}-provider`)?.value;
+    const providers = collectProviders();
+    return providers.find((provider) => provider.id === id)?.baseUrl || "";
+  }
+
+  function refreshThinkingOptions() {
+    ["red", "black"].forEach((side) => {
+      const select = document.querySelector(`#${side}-thinking`);
+      const hint = document.querySelector(`#${side}-thinking-hint`);
+      const current = select.value || "off";
+      const capability = thinkingCapability(providerBaseUrlForSide(side));
+      const options = thinkingOptionsForCapability(capability);
+      select.replaceChildren();
+      options.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.value;
+        option.textContent = item.label;
+        select.append(option);
+      });
+      select.value = normalizeThinkingValue(current, capability);
+      select.disabled = capability === "none";
+      if (hint) {
+        hint.textContent =
+          capability === "levels"
+            ? "OpenRouter：可设不思考／低／中／高"
+            : capability === "toggle"
+              ? "该厂商仅支持开／关思考"
+              : "该厂商不发送思考强度参数";
+      }
     });
   }
 
@@ -612,10 +702,17 @@ export function createUI(callbacks) {
       document.querySelector(`#${side}-name`).value = player.name || "";
       document.querySelector(`#${side}-provider`).value = player.providerId || "";
       document.querySelector(`#${side}-model`).value = player.model || "";
-      document.querySelector(`#${side}-thinking`).value = player.thinking || "off";
       document.querySelector(`#${side}-context`).value = player.contextTokens ?? DEFAULT_CONTEXT_TOKENS;
       document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     });
+    refreshThinkingOptions();
+    ["red", "black"].forEach((side) => {
+      const player = settings[side] || {};
+      const capability = thinkingCapability(providerBaseUrlForSide(side));
+      document.querySelector(`#${side}-thinking`).value = normalizeThinkingValue(player.thinking || "off", capability);
+    });
+    setDirty(false);
+    setTestResult("", true);
   }
 
   function readSettings() {
@@ -685,24 +782,71 @@ export function createUI(callbacks) {
   document.querySelector("#btn-start").addEventListener("click", () => callbacks.onStart?.());
   document.querySelector("#btn-pause").addEventListener("click", () => callbacks.onPause?.());
   document.querySelector("#btn-stop").addEventListener("click", () => callbacks.onStop?.());
-  document.querySelector("#btn-settings").addEventListener("click", () => document.querySelector("#settings").showModal());
-  document.querySelector("#btn-close-settings").addEventListener("click", () => document.querySelector("#settings").close());
+  let settingsDirty = false;
+  let baselineSettings = null;
+  const dirtyBadge = document.querySelector("#settings-dirty");
+  function setDirty(on) {
+    settingsDirty = Boolean(on);
+    if (dirtyBadge) dirtyBadge.hidden = !settingsDirty;
+  }
+  function markDirty() {
+    setDirty(true);
+  }
+
+  function openSettingsDialog() {
+    baselineSettings = callbacks.getSavedSettings?.() || null;
+    if (baselineSettings) fillSettings(baselineSettings);
+    document.querySelector("#settings").showModal();
+    setDirty(false);
+  }
+
+  function discardAndCloseSettings() {
+    if (baselineSettings) fillSettings(baselineSettings);
+    else if (callbacks.getSavedSettings) fillSettings(callbacks.getSavedSettings());
+    setDirty(false);
+    document.querySelector("#settings").close();
+  }
+
+  document.querySelector("#btn-settings").addEventListener("click", () => openSettingsDialog());
+  document.querySelector("#btn-close-settings").addEventListener("click", () => discardAndCloseSettings());
+  document.querySelector("#settings").addEventListener("cancel", (event) => {
+    // Esc：同样丢弃草稿
+    event.preventDefault();
+    discardAndCloseSettings();
+  });
   document.querySelector("#btn-add-provider").addEventListener("click", () => {
     document.querySelector("#provider-rows").append(providerRow({}));
     refreshProviderOptions();
+    refreshThinkingOptions();
+    markDirty();
   });
-  // 新增的供应商边填边进下拉：不用再增删一行去"刷新"，也不必等失焦
-  document.querySelector("#provider-rows").addEventListener("input", refreshProviderOptions);
-  document.querySelector("#provider-rows").addEventListener("change", refreshProviderOptions);
-  // 换了供应商，上一家的模型候选就作废，免得把别人家的模型 id 填进来
+  document.querySelector("#provider-rows").addEventListener("input", () => {
+    refreshProviderOptions();
+    markDirty();
+  });
+  document.querySelector("#provider-rows").addEventListener("change", () => {
+    refreshProviderOptions();
+    refreshThinkingOptions();
+    markDirty();
+  });
   ["red", "black"].forEach((side) => {
-    document.querySelector(`#${side}-provider`).addEventListener("change", () => setModels(side, []));
+    document.querySelector(`#${side}-provider`).addEventListener("change", () => {
+      setModels(side, []);
+      refreshThinkingOptions();
+      markDirty();
+    });
   });
+  document.querySelector("#settings-form").addEventListener("input", markDirty);
+  document.querySelector("#settings-form").addEventListener("change", markDirty);
   document.querySelector("#btn-history").addEventListener("click", () => document.querySelector("#history").showModal());
   document.querySelector("#btn-close-history").addEventListener("click", () => document.querySelector("#history").close());
   document.querySelector("#settings-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    callbacks.onSave?.(readSettings());
+    const next = readSettings();
+    callbacks.onSave?.(next);
+    baselineSettings = next;
+    setDirty(false);
+    toast("设置已保存");
     document.querySelector("#settings").close();
   });
   document.querySelector("#btn-test").addEventListener("click", () => callbacks.onTest?.());
@@ -713,7 +857,7 @@ export function createUI(callbacks) {
   window.addEventListener("resize", fitBoard);
   fitBoard();
 
-  return { update, setClocks, fillSettings, readSettings, setHistory, setModels, setTestResult, toast, fitBoard, openSettings: () => document.querySelector("#settings").showModal() };
+  return { update, setClocks, fillSettings, readSettings, setHistory, setModels, setTestResult, toast, fitBoard, openSettings: openSettingsDialog, isSettingsDirty: () => settingsDirty };
 }
 
 function moveLabel(move) {

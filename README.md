@@ -5,7 +5,7 @@
 - 在线地址：`https://keyblues.github.io/chinese-chess-ai-arena/`
 - 使用方式：打开页面 → 设置里填入厂商 Base URL、API Key、红黑双方的模型 ID → 开局。
 - 默认上下文窗口 **128k**（131072）、最大输出 **32k**（32768）。双方各自保留**完整**跨回合会话（盘面、tool 往返、`reasoning_content` 均不截断）；占用达到窗口的 **80%**（且不超过「窗口 − 输出上限」）时，由同一模型把更早回合**摘要压缩**成一条记忆（失败则整回合丢弃），最近若干回合保持原文。完整会话存 IndexedDB，棋谱等轻量状态仍在 localStorage。
-- 每方可设"思考强度"（不思考／低／中／高，默认不思考）：按厂商方言发送（OpenRouter 用 `reasoning`、智谱与 Kimi 用 `thinking`、SiliconFlow 用 `enable_thinking`），认不出的厂商不发该参数，被厂商拒绝时自动退回不带参数重试。推理 token 计入输出上限，所以"不思考"能明显减少"分析过长被截断未落子"。
+- 每方可设"思考强度"（默认不思考）：界面按所选供应商 Base URL 显示实际能力——OpenRouter 为不思考／低／中／高；智谱、Kimi、SiliconFlow 等为开／关；DeepSeek 等不发送该参数。被厂商拒绝时自动退回不带参数重试。推理 token 计入输出上限。
 - API Key 只保存在你自己浏览器的 localStorage 里，只会发给你填的那个厂商，不经过任何第三方。
 
 ## 厂商直连支持（浏览器 CORS）

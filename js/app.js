@@ -4,6 +4,7 @@ import { Match, resultText } from "./match.js";
 import { clearActive, loadActive, loadMatches, loadSettings, saveActive, saveMatch, saveSettings } from "./storage.js";
 import { saveGameMemory, loadGameMemory, deleteGameMemory } from "./memory-store.js";
 import { createUI, transcript } from "./ui.js";
+import { settingsForStart } from "./settings-logic.js";
 
 let settings = loadSettings();
 let history = loadMatches();
@@ -14,10 +15,11 @@ const ui = createUI({
   onStart: startMatch,
   onPause: togglePause,
   onStop: () => match?.stop(),
+  getSavedSettings: () => settings,
   onSave: (next) => {
     settings = next;
     saveSettings(settings);
-    ui.toast("设置已保存在这台浏览器");
+    match?.rebindSettings?.(settings);
     paint();
   },
   onTest: testApi,
@@ -66,6 +68,10 @@ const hooks = {
   onPersist: (data) => saveActive(data),
   onPersistMemory: (gameId, memory) => saveGameMemory(gameId, memory, { onWarn: (msg) => ui.toast(msg) }),
   onMemoryWarn: (msg) => ui.toast(msg),
+  onNeedSettings: (message) => {
+    ui.toast(message);
+    ui.openSettings();
+  },
   onFinish: (data) => {
     clearActive();
     void deleteGameMemory(data.id);
@@ -166,8 +172,13 @@ function providerById(providers, id) {
 }
 
 function startMatch() {
-  settings = ui.readSettings();
-  saveSettings(settings);
+  const gate = settingsForStart({ dirty: Boolean(ui.isSettingsDirty?.()) });
+  if (!gate.ok) {
+    ui.toast("设置里有未保存的修改，请先打开设置并保存或取消");
+    // 不自动 openSettings：避免按已保存值重填把草稿冲掉
+    return;
+  }
+  // 开局只用已保存的设置，不把对话框草稿悄悄落盘
   const redProvider = providerById(settings.providers, settings.red.providerId);
   const blackProvider = providerById(settings.providers, settings.black.providerId);
   if (!redProvider || !blackProvider) {

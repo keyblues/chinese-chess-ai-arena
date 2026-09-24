@@ -532,7 +532,18 @@ export class Match {
 
   providerOf(side) {
     const id = this.players[side]?.providerId;
-    return this.providers.find((provider) => provider.id === id) || this.providers[0] || { baseUrl: "", apiKey: "" };
+    return this.providers.find((provider) => provider.id === id) || null;
+  }
+
+  /** 设置页保存后同步到进行中的对局，避免「修好供应商点继续」仍用构造时的旧 providers */
+  rebindSettings(settings) {
+    if (!settings) return;
+    this.providers = settings.providers || [];
+    if (settings.temperature != null) this.temperature = settings.temperature;
+    this.players = {
+      r: shapePlayer(settings.red, this.players.r),
+      b: shapePlayer(settings.black, this.players.b),
+    };
   }
 
   snapshot() {
@@ -724,6 +735,14 @@ export class Match {
         if (before) {
           this.finish(before);
           return;
+        }
+        const provider = this.providerOf(this.pos.side);
+        if (!provider?.baseUrl || !provider?.apiKey) {
+          this.pause();
+          this.hooks.onNeedSettings?.(
+            `${this.pos.side === "r" ? "红方" : "黑方"}供应商已失效或缺少密钥，请在设置里重新选择后再继续`,
+          );
+          continue;
         }
         let outcome;
         try {
@@ -939,14 +958,20 @@ export class Match {
       try {
         this.phase[side] = failures ? `重试 ${failures}/${MAX_FAILURES}` : "思考中";
         this.emit();
+        const endpoint = this.providerOf(side);
+        if (!endpoint?.baseUrl || !endpoint?.apiKey) {
+          this.pause();
+          this.hooks.onNeedSettings?.("供应商已失效，请在设置里重新选择");
+          return null;
+        }
         const ctxWindow = Number(player.contextTokens) > 0 ? Number(player.contextTokens) : DEFAULT_CONTEXT_TOKENS;
         const outbound = trimMessages(messages, player.contextTokens, this.echoReasoning, cap);
         // 请求 token + max_tokens 不得超过上下文窗（小窗口/输出≈窗口时尤其关键）
         const room = ctxWindow - messagesTokens(outbound);
         const sendCap = Math.max(1, Math.min(cap, room));
         acc = await streamChat({
-          baseUrl: this.providerOf(side).baseUrl,
-          apiKey: this.providerOf(side).apiKey,
+          baseUrl: endpoint.baseUrl,
+          apiKey: endpoint.apiKey,
           model: player.model,
           messages: outbound,
           tools: TOOLS,
