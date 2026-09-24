@@ -239,13 +239,19 @@ function keepStartIndex(list, keepTurns = KEEP_RECENT_TURNS) {
   return starts[starts.length - keepTurns];
 }
 
-function digestForCompaction(messages) {
+/** 压缩摘要里每条 reasoning 最多保留的字符，避免把积压的思维链整段再送进 compact 请求 */
+export const DIGEST_REASONING_CLIP = 500;
+
+export function digestForCompaction(messages) {
   return (messages || [])
     .map((message) => {
       const bits = [`[${message.role}]`];
       if (message.content) bits.push(String(message.content));
       if (typeof message.reasoning_content === "string" && message.reasoning_content) {
-        bits.push(`(reasoning) ${message.reasoning_content}`);
+        // 完整 reasoning 已在 memory；摘要只需意向片段。不裁会把数万 token 思维链再次计费。
+        const raw = message.reasoning_content;
+        const clipped = raw.length > DIGEST_REASONING_CLIP ? `${raw.slice(0, DIGEST_REASONING_CLIP)}…` : raw;
+        bits.push(`(reasoning) ${clipped}`);
       }
       if (message.tool_calls?.length) bits.push(`(tool_calls) ${JSON.stringify(message.tool_calls)}`);
       if (message.role === "tool") bits.push(`(tool_call_id=${message.tool_call_id}) name=${message.name || ""}`);
@@ -902,7 +908,8 @@ export class Match {
             ],
             temperature: Math.min(0.3, this.temperature),
             maxTokens: Math.min(4096, baseCap),
-            thinking: null,
+            // 必须显式 off：thinking 为 null 时不发禁用字段，小米 MiMo 等会默认开思考再烧一轮
+            thinking: "off",
             signal: this.controller?.signal,
           });
           return acc.content || "";
@@ -939,7 +946,9 @@ export class Match {
     let truncations = 0;
 
     // 输出被上限截断不是模型违规，也不是策略问题：半截文本/半截参数一律不回灌历史
-    // （只会让下一次请求更长更慢、更像在自我重复），直接把输出上限翻倍重发一次。
+    // （只会让下一次请求更长更慢、更像在自我重复），尝试在配置上限内翻倍后重发。
+    // 注意：若本回合一开始就已是 baseCap（默认 32k），翻倍会被夹住、实际抬不上去——
+    // 思考默认开时单次即可烧光 max_tokens，连续截断最多约 1+MAX_TRUNCATIONS 次全额 completion。
     // 返回 null 表示已重发，返回对象表示该用裁判代走收场。
     let lastSendCap = cap;
     const truncationRetry = (step, trace) => {

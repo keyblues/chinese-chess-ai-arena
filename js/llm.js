@@ -442,6 +442,8 @@ export async function testConnection({ baseUrl, apiKey, model, signal }) {
       messages: [{ role: "user", content: "回复一个字：好" }],
       temperature: 0,
       maxTokens: 32,
+      // 显式关思考：否则小米 MiMo 等默认开思考，32 token 全烧在推理上，探测像「无正文」
+      thinking: "off",
       signal,
     });
     return { ok: true, message: acc.content ? "对话接口可用" : "接口有响应", models: [] };

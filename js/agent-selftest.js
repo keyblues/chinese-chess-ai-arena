@@ -17,6 +17,8 @@ import {
   packMemory,
   truncationNudgeText,
   truncationRetryPhase,
+  digestForCompaction,
+  DIGEST_REASONING_CLIP,
 } from "./match.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 import { saveGameMemory, loadGameMemory, resetMemoryStoreForTests } from "./memory-store.js";
@@ -115,7 +117,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.equal(match.traces.r[0].ply, 0, "日志条目必须带回合号");
 }
 
-// 2) 首轮被截断：不带半截分析重发，输出上限翻倍
+// 2) 首轮被截断：不带半截分析重发；已在配置顶时翻倍夹住，不得谎称已放宽
 {
   const { match, outcome } = await play([
     reasoning("我在想……先比较一下马八进七和炮二平五，然后……", "length"),
@@ -168,7 +170,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   assert.match(requests[1].messages.find((message) => message.role === "tool").content, /非法着法/);
 }
 
-// 6) 抬高过的上限要记住：同一个模型下一手直接从这儿起步，不再白烧一次 8k 生成
+// 6) 截断后 capFloor 仍受配置顶约束：下一手也不会突破 maxOutputTokens
 {
   const match = makeMatch();
   script = [reasoning("想很久", "length"), toolCall("commit_move", { move: "h2e2", thought: "炮二平五" })];
@@ -805,7 +807,72 @@ console.log("agent loop ok");
   );
 }
 
+
+// 32) digestForCompaction：长 reasoning 必须裁剪，避免压缩请求再吃积压思维链
+{
+  assert.equal(DIGEST_REASONING_CLIP, 500);
+  const digest = digestForCompaction([
+    { role: "assistant", content: "短", reasoning_content: "R".repeat(2000) },
+  ]);
+  assert.ok(digest.includes("(reasoning) "));
+  assert.ok(digest.includes("…"), "超长 reasoning 应带省略号");
+  const reasoningPart = digest.split("(reasoning) ")[1] || "";
+  assert.ok(reasoningPart.length < 2000, "不得把 2000 字 reasoning 原样塞进摘要");
+  assert.ok(reasoningPart.replace("…", "").length <= DIGEST_REASONING_CLIP + 5);
+}
+
+// 33) 起始 cap=baseCap(32k) 时截断「翻倍」抬不上去：三次请求都是 32k（设计气味，非本次改动）
+{
+  const { outcome } = await play(
+    [
+      reasoning("烧一", "length"),
+      reasoning("烧二", "length"),
+      reasoning("烧三", "length"),
+      reasoning("烧四", "length"),
+    ],
+    32768,
+  );
+  assert.deepEqual(outcome, { kind: "random", reason: "输出连续被截断，裁判代走" });
+  assert.deepEqual(caps(), [32768, 32768, 32768], "已在配置顶时翻倍无效，每次仍邀满额 completion");
+}
+
+// 34) 压缩路径必须显式 thinking=off，小米 MiMo 出站带 type=disabled（thinking:null 会默认开思考）
+{
+  const match = makeMatch(4000, "https://api.xiaomimimo.com/v1", "off");
+  match.players.r.contextTokens = 3000;
+  // 塞满旧回合，逼出压缩
+  const fat = [];
+  for (let ply = 0; ply < 6; ply += 1) {
+    fat.push({ role: "user", content: "盘面".repeat(400) + ` ply${ply}`, _meta: { kind: "turn", turnPly: ply } });
+    fat.push({
+      role: "assistant",
+      content: "想",
+      reasoning_content: "R".repeat(800),
+      tool_calls: [{ id: `c${ply}`, type: "function", function: { name: "commit_move", arguments: '{"move":"h2e2"}' } }],
+    });
+    fat.push({ role: "tool", tool_call_id: `c${ply}`, name: "commit_move", content: "ok" });
+  }
+  match.memory.r = [{ role: "system", content: systemPrompt("r") }, ...fat];
+  script = [
+    // 压缩请求：无 tools
+    (body) => {
+      assert.equal("tools" in body, false, "压缩请求不应带 tools");
+      assert.deepEqual(body.thinking, { type: "disabled" }, "压缩必须显式 disabled，不能靠 null 省略");
+      assert.ok(body.max_tokens <= 4096);
+      return jsonChat({ content: "红方中炮布局，互兑一马，局势均衡。" });
+    },
+    toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
+  ];
+  requests = [];
+  const outcome = await match.playTurn();
+  assert.equal(outcome.kind, "move");
+  assert.ok(requests.length >= 2, "应先压缩再落子");
+  assert.deepEqual(requests[0].thinking, { type: "disabled" });
+  assert.ok(match.traces.r.some((item) => /压缩/.test(item.result || "")), "应留下压缩裁判提示");
+}
+
 console.log("agent regressions ok");
 console.log("board memory ok");
 console.log("context budget ok");
 console.log("compaction ok");
+console.log("token-burn audit fixes ok");

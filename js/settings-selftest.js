@@ -121,4 +121,35 @@ assert.equal(resolveProvider(providers, "pA")?.apiKey, "ka");
   assert.equal(settingsForStart({ dirty: false }).ok, true);
 }
 
+
+// 连通探测须显式 thinking=off，避免 MiMo 默认思考把 32 token 烧光
+{
+  const seen = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes("/models")) {
+      return new Response("nope", { status: 404 });
+    }
+    const body = JSON.parse(options.body);
+    seen.push(body);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "好" }, finish_reason: "stop" }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await testConnection({
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      apiKey: "k",
+      model: "mimo-v2",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].thinking, { type: "disabled" }, "探测对话必须带 disabled");
+    assert.equal(seen[0].max_tokens, 32);
+  } finally {
+    globalThis.fetch = prev;
+  }
+}
+
 console.log("settings logic ok");
