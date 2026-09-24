@@ -40,14 +40,24 @@ function configuredOutputCap(player) {
   return Math.max(256, Math.min(out, ctx));
 }
 
-/** 截断重试时裁判日志文案：只有 cap 真的抬高才说「已放宽」 */
-export function truncationNudgeText({ truncations, givingUp, hardCap, raised, cap }) {
+/** 截断重试时裁判日志文案。
+ * - givingUp / hardCap：原语义
+ * - roomLimited：本请求实际 max_tokens（sendCap）低于当时配置 cap（上下文余量夹紧），不说「已放宽」
+ * - raised：配置 cap 真的抬高了，且本次并非余量夹紧
+ * - else：已在配置顶
+ * sendCap 为触发截断的那次请求实际下发的 max_tokens；cap 为抬限尝试之后的配置软顶。
+ */
+export function truncationNudgeText({ truncations, givingUp, hardCap, raised, cap, sendCap, roomLimited }) {
   const k = Math.round(Number(cap) / 1000);
+  const sk = Math.round(Number(sendCap ?? cap) / 1000);
   if (givingUp) {
     return `分析过长被截断未落子（第 ${truncations} 次）。连续被截断，裁判代走。`;
   }
   if (hardCap) {
-    return `分析过长被截断未落子（第 ${truncations} 次）。该模型输出上限 ${k}k 是硬顶，只能催它直接落子。`;
+    return `分析过长被截断未落子（第 ${truncations} 次）。该模型输出上限 ${sk}k 是硬顶，只能催它直接落子。`;
+  }
+  if (roomLimited) {
+    return `分析过长被截断未落子（第 ${truncations} 次）。本请求实际输出上限 ${sk}k（配置 ${k}k，受上下文余量限制），只能催促直接落子。`;
   }
   if (raised) {
     return `分析过长被截断未落子（第 ${truncations} 次）。已放宽输出上限到 ${k}k 并催促直接落子。`;
@@ -55,10 +65,12 @@ export function truncationNudgeText({ truncations, givingUp, hardCap, raised, ca
   return `分析过长被截断未落子（第 ${truncations} 次）。输出上限已是配置的 ${k}k，只能催促直接落子。`;
 }
 
-/** 截断重试时的 phase 文案：未抬高时不暗示「放宽」 */
-export function truncationRetryPhase({ hardCap, raised, cap }) {
+/** 截断重试时的 phase 文案：余量夹紧 / 未抬高时不暗示「放宽」 */
+export function truncationRetryPhase({ hardCap, raised, cap, sendCap, roomLimited }) {
   const k = Math.round(Number(cap) / 1000);
-  if (hardCap) return `重试 · 输出被截断（上限 ${k}k 硬顶）`;
+  const sk = Math.round(Number(sendCap ?? cap) / 1000);
+  if (hardCap) return `重试 · 输出被截断（上限 ${sk}k 硬顶）`;
+  if (roomLimited) return `重试 · 输出被截断（实际上限 ${sk}k，上下文余量）`;
   if (raised) return `重试 · 输出超长被截断（上限 ${k}k）`;
   return `重试 · 输出被截断（已是配置上限 ${k}k）`;
 }
@@ -929,9 +941,12 @@ export class Match {
     // 输出被上限截断不是模型违规，也不是策略问题：半截文本/半截参数一律不回灌历史
     // （只会让下一次请求更长更慢、更像在自我重复），直接把输出上限翻倍重发一次。
     // 返回 null 表示已重发，返回对象表示该用裁判代走收场。
+    let lastSendCap = cap;
     const truncationRetry = (step, trace) => {
       truncations += 1;
       const givingUp = truncations > MAX_TRUNCATIONS;
+      const hitSendCap = lastSendCap;
+      const capBefore = cap;
       let raised = false;
       if (!hardCap) {
         // 不超过配置的输出上限，也不超过上下文窗；只有真的抬高了才说「已放宽」
@@ -940,13 +955,24 @@ export class Match {
         cap = next;
         this.capFloor[side] = cap;
       }
+      // 触发截断的那次请求：sendCap = min(capBefore, room)。余量夹紧时抬配置顶也救不了当次上限。
+      const roomLimited = hitSendCap < capBefore;
+      const nudgeArgs = {
+        truncations,
+        givingUp,
+        hardCap,
+        raised,
+        cap,
+        sendCap: hitSendCap,
+        roomLimited,
+      };
       traceAdd(trace, {
         id: `nudge-${step}`,
         ply: turnPly,
         kind: "tool",
         title: "裁判",
         body: "",
-        result: truncationNudgeText({ truncations, givingUp, hardCap, raised, cap }),
+        result: truncationNudgeText(nudgeArgs),
         pending: false,
         ok: false,
       });
@@ -956,7 +982,7 @@ export class Match {
         commitMemory();
         return { kind: "random", reason: "输出连续被截断，裁判代走" };
       }
-      this.phase[side] = truncationRetryPhase({ hardCap, raised, cap });
+      this.phase[side] = truncationRetryPhase(nudgeArgs);
       messages.push({
         role: "user",
         content: "你上一轮在输出上限处被截断，没有提交着法，那次输出已作废。不要再写分析，直接调用 commit_move 提交一步合法着法。",
@@ -989,6 +1015,7 @@ export class Match {
         // 请求 token + max_tokens 不得超过上下文窗（小窗口/输出≈窗口时尤其关键）
         const room = ctxWindow - messagesTokens(outbound);
         const sendCap = Math.max(1, Math.min(cap, room));
+        lastSendCap = sendCap;
         acc = await streamChat({
           baseUrl: endpoint.baseUrl,
           apiKey: endpoint.apiKey,

@@ -747,34 +747,54 @@ console.log("agent loop ok");
 }
 
 
-// 31) truncationNudgeText / truncationRetryPhase：四类文案互斥，已在上限时不说「已放宽」
+// 31) truncationNudgeText / truncationRetryPhase：文案互斥；已在上限 / 余量夹紧时不说「已放宽」
 {
-  const givingUp = truncationNudgeText({ truncations: 3, givingUp: true, hardCap: false, raised: false, cap: 32768 });
+  const base = { truncations: 1, givingUp: false, hardCap: false, raised: false, roomLimited: false };
+
+  const givingUp = truncationNudgeText({ ...base, truncations: 3, givingUp: true, cap: 32768, sendCap: 32768 });
   assert.equal(givingUp, "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。");
 
-  const hard = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: true, raised: false, cap: 8192 });
+  const hard = truncationNudgeText({ ...base, hardCap: true, cap: 8192, sendCap: 8192 });
   assert.equal(hard, "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。");
 
-  const raised = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: false, raised: true, cap: 16000 });
+  const raised = truncationNudgeText({ ...base, raised: true, cap: 16000, sendCap: 8000 });
   assert.equal(raised, "分析过长被截断未落子（第 1 次）。已放宽输出上限到 16k 并催促直接落子。");
 
-  const ceiling = truncationNudgeText({ truncations: 1, givingUp: false, hardCap: false, raised: false, cap: 32000 });
+  const ceiling = truncationNudgeText({ ...base, cap: 32000, sendCap: 32000 });
   assert.equal(ceiling, "分析过长被截断未落子（第 1 次）。输出上限已是配置的 32k，只能催促直接落子。");
   assert.equal(/已放宽/.test(ceiling), false);
 
-  // givingUp / hardCap 优先于 raised，避免组合态串文案
+  // 上下文余量把实际 max_tokens 夹到配置顶以下：必须报 sendCap，且不得说已放宽（即使 raised）
+  const room = truncationNudgeText({
+    ...base,
+    raised: true,
+    roomLimited: true,
+    cap: 32000,
+    sendCap: 4000,
+  });
   assert.equal(
-    truncationNudgeText({ truncations: 3, givingUp: true, hardCap: true, raised: true, cap: 8192 }),
+    room,
+    "分析过长被截断未落子（第 1 次）。本请求实际输出上限 4k（配置 32k，受上下文余量限制），只能催促直接落子。",
+  );
+  assert.equal(/已放宽/.test(room), false);
+
+  // givingUp / hardCap / roomLimited 优先于 raised
+  assert.equal(
+    truncationNudgeText({ ...base, truncations: 3, givingUp: true, hardCap: true, raised: true, roomLimited: true, cap: 8192, sendCap: 1000 }),
     "分析过长被截断未落子（第 3 次）。连续被截断，裁判代走。",
   );
   assert.equal(
-    truncationNudgeText({ truncations: 1, givingUp: false, hardCap: true, raised: true, cap: 8192 }),
+    truncationNudgeText({ ...base, hardCap: true, raised: true, roomLimited: true, cap: 8192, sendCap: 8192 }),
     "分析过长被截断未落子（第 1 次）。该模型输出上限 8k 是硬顶，只能催它直接落子。",
   );
 
-  assert.equal(truncationRetryPhase({ hardCap: true, raised: false, cap: 8192 }), "重试 · 输出被截断（上限 8k 硬顶）");
-  assert.equal(truncationRetryPhase({ hardCap: false, raised: true, cap: 16000 }), "重试 · 输出超长被截断（上限 16k）");
-  assert.equal(truncationRetryPhase({ hardCap: false, raised: false, cap: 32000 }), "重试 · 输出被截断（已是配置上限 32k）");
+  assert.equal(truncationRetryPhase({ ...base, hardCap: true, cap: 8192, sendCap: 8192 }), "重试 · 输出被截断（上限 8k 硬顶）");
+  assert.equal(truncationRetryPhase({ ...base, raised: true, cap: 16000, sendCap: 8000 }), "重试 · 输出超长被截断（上限 16k）");
+  assert.equal(truncationRetryPhase({ ...base, cap: 32000, sendCap: 32000 }), "重试 · 输出被截断（已是配置上限 32k）");
+  assert.equal(
+    truncationRetryPhase({ ...base, raised: true, roomLimited: true, cap: 32000, sendCap: 4000 }),
+    "重试 · 输出被截断（实际上限 4k，上下文余量）",
+  );
 }
 
 console.log("agent regressions ok");
