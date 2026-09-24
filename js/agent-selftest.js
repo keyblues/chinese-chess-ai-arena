@@ -219,7 +219,9 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   // 输出上限不得超上下文窗：200k 配置在 128k 窗口下会被收成 128k
   const { match, outcome } = await play([strict, strict], 200000);
   assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
-  assert.deepEqual(caps(), [128000, 8192], "先受上下文窗约束，再一次压到常见硬顶");
+  assert.equal(caps()[0] <= 128000, true, "先受上下文窗约束（还要给 prompt 留位）");
+  assert.ok(caps()[0] > 100000, "大窗口下输出上限应接近窗宽");
+  assert.equal(caps()[1], 8192, "再一次压到常见硬顶");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
 }
 
@@ -630,7 +632,101 @@ console.log("agent loop ok");
   assert.ok(tight + 4500 <= 5000);
 }
 
+// 26) trimMessages 发出去的消息不得带 _meta；半截 tool_calls 要削干净
+{
+  const msgs = [
+    { role: "system", content: "s" },
+    {
+      role: "user",
+      content: "turn " + "盘".repeat(20),
+      _meta: { kind: "turn", turnPly: 0, full: true },
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "a", type: "function", function: { name: "commit_move", arguments: "{}" } },
+        { id: "b", type: "function", function: { name: "look_board", arguments: "{}" } },
+      ],
+    },
+    { role: "tool", tool_call_id: "a", name: "commit_move", content: "ok" },
+    {
+      role: "user",
+      content: "next",
+      _meta: { kind: "turn", turnPly: 2, full: true },
+    },
+  ];
+  const out = trimMessages(msgs, 128000, false, 8000);
+  assert.equal(out.every((m) => !("_meta" in m)), true, "请求体不得含 _meta");
+  const asst = out.find((m) => m.role === "assistant");
+  assert.ok(asst);
+  assert.deepEqual(
+    (asst.tool_calls || []).map((c) => c.id),
+    ["a"],
+    "未收到结果的 tool_call 必须去掉",
+  );
+}
+
+// 27) persist：onPersist 返回 false 时降级为 omitMemory 再写
+{
+  const writes = [];
+  const match = makeMatch();
+  match.hooks.onPersist = (data) => {
+    writes.push(data);
+    if (data.memory) return false;
+    return true;
+  };
+  match.memory.r.push({
+    role: "user",
+    content: "x",
+    _meta: { kind: "turn", turnPly: 0, full: false },
+  });
+  match.persist();
+  assert.equal(writes.length, 2, "应先写全量再降级");
+  assert.ok(writes[0].memory, "第一次带 memory");
+  assert.equal("memory" in writes[1], false, "降级后omit memory");
+}
+
+// 28) packMemory 不得截断 reasoning_content（DeepSeek 原样回放）
+{
+  const match = makeMatch();
+  match.memory.r = [
+    { role: "system", content: "s" },
+    {
+      role: "assistant",
+      content: "c",
+      reasoning_content: "R".repeat(2000),
+      tool_calls: [{ id: "c1", type: "function", function: { name: "commit_move", arguments: "{}" } }],
+    },
+    { role: "tool", tool_call_id: "c1", name: "commit_move", content: "ok" },
+  ];
+  const packed = match.serialize().memory.r;
+  const asst = packed.find((m) => m.role === "assistant");
+  assert.equal(asst.reasoning_content.length, 2000, "reasoning_content 必须原样保留");
+}
+
+// 29) 裁判代走说明在 persist 之前写入 memory
+{
+  const snapshots = [];
+  const match = makeMatch();
+  match.hooks.onPersist = (data) => {
+    snapshots.push(data);
+    return true;
+  };
+  // 直接走 random 代走路径的核心：append 后 apply
+  const legal = (await import("./engine.js")).legalMoves(match.pos);
+  const move = legal[0];
+  const notation = "测试着";
+  const turnPly = match.records.length;
+  match.appendSubstituteNote("r", move, "测", notation, turnPly);
+  match.applyCommitted({ move, iccs: move.iccs, thought: "裁判代走（测）", substitute: true });
+  assert.ok(snapshots.length >= 1);
+  const mem = snapshots[snapshots.length - 1].memory.r.map((m) => m.content || "").join("\n");
+  assert.match(mem, /裁判代走/, "persist 快照里必须已有代走说明");
+}
+
 console.log("agent regressions ok");
 console.log("board memory ok");
 console.log("context budget ok");
+console.log("outbound sanitize ok");
 

@@ -160,7 +160,8 @@ function packMemory(messages) {
     if (message.name) packed.name = message.name;
     if (message.tool_call_id) packed.tool_call_id = message.tool_call_id;
     if (message.tool_calls) packed.tool_calls = message.tool_calls;
-    if (typeof message.reasoning_content === "string") packed.reasoning_content = clip(message.reasoning_content, 800);
+    // DeepSeek 带 tools 时要求 reasoning_content 原样回放，截断会导致重载后持续 400
+    if (typeof message.reasoning_content === "string") packed.reasoning_content = message.reasoning_content;
     if (message._meta) packed._meta = { ...message._meta, full: false };
     return packed;
   });
@@ -209,11 +210,29 @@ export function rebuildMemoryFromRecords(side, records) {
   return messages;
 }
 
+function stripUnmetToolCalls(result, pending) {
+  if (!pending.size || !result.length) return;
+  for (let i = result.length - 1; i >= 0; i -= 1) {
+    const message = result[i];
+    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
+    const kept = message.tool_calls.filter((call) => !pending.has(call.id));
+    if (!kept.length) {
+      const { tool_calls, ...rest } = message;
+      result[i] = rest;
+    } else if (kept.length !== message.tool_calls.length) {
+      result[i] = { ...message, tool_calls: kept };
+    }
+    break;
+  }
+}
+
 function sanitizeToolProtocol(messages) {
   const result = [];
   let pending = new Set();
   for (const message of messages) {
     if (message.role === "assistant") {
+      // 上一轮 tool_calls 尚未收齐就又来了 assistant：先削掉未完成的调用
+      stripUnmetToolCalls(result, pending);
       const calls = message.tool_calls || [];
       pending = new Set(calls.map((call) => call.id).filter(Boolean));
       result.push(message);
@@ -226,33 +245,12 @@ function sanitizeToolProtocol(messages) {
       }
       continue;
     }
-    if (pending.size && result.length) {
-      const last = result[result.length - 1];
-      if (last.role === "assistant" && last.tool_calls?.length) {
-        const kept = last.tool_calls.filter((call) => !pending.has(call.id));
-        if (!kept.length) {
-          const { tool_calls, ...rest } = last;
-          result[result.length - 1] = rest;
-        } else if (kept.length !== last.tool_calls.length) {
-          result[result.length - 1] = { ...last, tool_calls: kept };
-        }
-      }
-    }
+    // user / system / 其他：打断未完成的 tool 协议
+    stripUnmetToolCalls(result, pending);
     pending = new Set();
     result.push(message);
   }
-  if (pending.size && result.length) {
-    const last = result[result.length - 1];
-    if (last.role === "assistant" && last.tool_calls?.length) {
-      const kept = last.tool_calls.filter((call) => !pending.has(call.id));
-      if (!kept.length) {
-        const { tool_calls, ...rest } = last;
-        result[result.length - 1] = rest;
-      } else {
-        result[result.length - 1] = { ...last, tool_calls: kept };
-      }
-    }
-  }
+  stripUnmetToolCalls(result, pending);
   return result;
 }
 
@@ -570,11 +568,10 @@ export class Match {
     return data;
   }
 
-  appendSubstituteNote(side, move, reason, notation) {
+  appendSubstituteNote(side, move, reason, notation, turnPly = Math.max(0, this.records.length - 1)) {
     if (!this.memory[side]?.length) {
       this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
     }
-    const turnPly = Math.max(0, this.records.length - 1);
     this.memory[side].push({
       role: "user",
       content: `（裁判代走）因「${reason || "模型未落子"}」，裁判替你走了 ${move.iccs} ${notation}。请在后续回合基于此局面继续。`,
@@ -703,13 +700,14 @@ export class Match {
             pending: false,
             ok: false,
           });
+          // 代走说明必须在 persist 之前写入 memory，否则刷新后存档里没有这条说明
+          this.appendSubstituteNote(side, move, reason, notation, turnPly);
           this.applyCommitted({
             move,
             iccs: move.iccs,
             thought: `裁判代走（${reason}）`,
             substitute: true,
           });
-          this.appendSubstituteNote(side, move, reason, notation);
           const after = resolveAfterMove(this.pos, this.records, this.positions);
           if (after) {
             this.finish(after);
@@ -819,14 +817,19 @@ export class Match {
           this.hooks.onNeedSettings?.("供应商已失效，请在设置里重新选择");
           return null;
         }
+        const ctxWindow = Number(player.contextTokens) > 0 ? Number(player.contextTokens) : DEFAULT_CONTEXT_TOKENS;
+        const outbound = trimMessages(messages, player.contextTokens, this.echoReasoning, cap);
+        // 请求 token + max_tokens 不得超过上下文窗（小窗口/输出≈窗口时尤其关键）
+        const room = ctxWindow - messagesTokens(outbound);
+        const sendCap = Math.max(1, Math.min(cap, room));
         acc = await streamChat({
           baseUrl: endpoint.baseUrl,
           apiKey: endpoint.apiKey,
           model: player.model,
-          messages: trimMessages(messages, player.contextTokens, this.echoReasoning, cap),
+          messages: outbound,
           tools: TOOLS,
           temperature: this.temperature,
-          maxTokens: cap,
+          maxTokens: sendCap,
           thinking: this.dropThinking ? null : player.thinking,
           signal: this.controller.signal,
           onDelta: (delta) => {
@@ -1167,7 +1170,12 @@ export function trimMessages(messages, contextTokens, echoReasoning = false, max
     if (next.length >= list.length) break;
     list = next;
   }
-  return sanitizeToolProtocol(list);
+  // 对外请求不得携带内部 _meta（部分 OpenAI 兼容接口会拒未知字段）
+  return sanitizeToolProtocol(list).map((message) => {
+    if (!message || typeof message !== "object" || !("_meta" in message)) return message;
+    const { _meta, ...rest } = message;
+    return rest;
+  });
 }
 
 function previewMove(call, legalMap) {

@@ -118,7 +118,7 @@ export function loadActive() {
 }
 
 export function saveActive(match) {
-  write(ACTIVE_KEY, match);
+  return write(ACTIVE_KEY, match);
 }
 export function clearActive() {
   localStorage.removeItem(ACTIVE_KEY);

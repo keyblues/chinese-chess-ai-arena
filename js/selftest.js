@@ -194,13 +194,14 @@ console.log("dock order ok");
   assert.equal(saveMatch(record("m3")).length, 2, "配额满时保存要自己砍旧局");
   assert.equal(loadMatches().length, 2, "砍完之后落盘的确实是能放下的一版");
   assert.equal(loadMatches()[0].id, "m3", "最新一局必须留住");
-  assert.doesNotThrow(() => saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }), "未完成对局写不下时也要静默放过");
+  assert.equal(saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }), false, "写不下时 saveActive 必须返回 false，供 persist 降级");
+  assert.equal(saveActive({ id: "ok", moves: [] }), true, "写得下时 saveActive 返回 true");
 
   globalThis.localStorage.setItem = () => {
     throw new Error("QuotaExceededError");
   };
   assert.doesNotThrow(() => saveMatch(record("m4")), "一个字都写不进去时同样不许抛");
-  assert.doesNotThrow(() => saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }));
+  assert.equal(saveActive({ id: "big", moves: new Array(50).fill({ iccs: "h2e2" }) }), false);
 }
 console.log("storage ok");
 

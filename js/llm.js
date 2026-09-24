@@ -13,7 +13,7 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "legal_moves",
-      description: "列出本方全部合法着法。正式落子前应先调用。每行是 ICCS 坐标和中文记谱。",
+      description: "列出本方全部合法着法。回合消息已附上合法着法时一般不必再调；需要复核时再用。每行是 ICCS 坐标和中文记谱。",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -21,7 +21,7 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "commit_move",
-      description: "提交本步着法并结束本轮。move 必须是 legal_moves 给出的 ICCS，例如 h2e2。",
+      description: "提交本步着法并结束本轮。move 必须是本回合合法着法列表中的 ICCS，例如 h2e2。",
       parameters: {
         type: "object",
         properties: {
