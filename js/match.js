@@ -2,6 +2,7 @@ import {
   applyMove,
   asciiBoard,
   inCheck,
+  pieceChar,
   legalMoves,
   opposite,
   parseIcCS,
@@ -13,14 +14,31 @@ import {
 } from "./engine.js";
 import { toNotation } from "./notation.js";
 import { TOOLS, normalizeCalls, streamChat } from "./llm.js";
-import { clip } from "./storage.js";
+import { clip, DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 const MAX_STEPS = 8;
 const MAX_FAILURES = 3;
 const DRAW_PLIES = 120;
-// 输出被上限截断时不带半截文本重发，只抬高输出上限；连续截断超过这个次数就交给裁判代走
+// 输出被上限截断时不带半截文本重发，只在配置上限内抬高；连续截断超过这个次数就交给裁判代走
 const MAX_TRUNCATIONS = 2;
-const TRUNCATION_TOKEN_CAP = 64000;
+/** 上下文占用达到窗口的该比例时开始压缩历史（再与「窗口 − 输出上限」取较小值） */
+export const CONTEXT_COMPRESS_RATIO = 0.8;
+
+/** 压缩/trim 预算：min(比例×窗口, 窗口−输出)，保证 请求+输出 不顶破上下文窗 */
+export function contextBudget(contextTokens, maxOutputTokens = 0) {
+  const ctx = Number(contextTokens) > 0 ? Number(contextTokens) : DEFAULT_CONTEXT_TOKENS;
+  const out = Math.max(0, Number(maxOutputTokens) || 0);
+  const byRatio = Math.floor(ctx * CONTEXT_COMPRESS_RATIO);
+  const byWindow = ctx - out;
+  return Math.max(0, Math.min(byRatio, byWindow));
+}
+
+function configuredOutputCap(player) {
+  const ctx = Number(player?.contextTokens) > 0 ? Number(player.contextTokens) : DEFAULT_CONTEXT_TOKENS;
+  const out = Number(player?.maxOutputTokens) > 0 ? Number(player.maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS;
+  // 输出上限不得超过配置值，也不得超过整个上下文窗
+  return Math.max(256, Math.min(out, ctx));
+}
 
 const TRACE_KIND_ORDER = { think: 0, say: 1, tool: 2, nudge: 3 };
 
@@ -45,30 +63,296 @@ function traceAdd(trace, entry) {
   return entry;
 }
 
-function systemPrompt(side) {
+export function systemPrompt(side) {
   const name = sideName(side);
   return [
     `你是中国象棋智能体，本局执${name}。裁判在本地，你不能用文字宣称已经走子。`,
-    "每步消息都会附上全部合法着法：比较后直接调用 commit_move 提交其中一步，move 必须逐字来自该列表。",
-    "需要复核盘面时才调用 look_board 或 legal_moves，不要重复查询。",
-    "分析不超过 150 字：从合法着法中选定一步，立即 commit_move，不要长篇推演。",
+    "每步消息都会附上当前盘面、双方子力与全部合法着法；move 必须逐字来自该合法着法列表。",
+    "look_board / legal_moves 仍可调用，但盘面与合法着法已附上，一般不必重复查询。",
+    "请先在合法着法中寻找将军与吃子，尤其是将杀进攻以及对己方将/帅的威胁；再考虑防守与计划；想清楚后调用 commit_move 提交。",
     "调用 commit_move 提交 ICCS 坐标，或调用 resign 认输。非法着法会被工具拒绝，然后你再选；连续多次违规或未落子时，裁判会从合法着法中随机代走一步（不会因此判负）。",
     "胜负由裁判裁定：将死、困毙、认输、超时。长将方负。同一局面三次重复且不是单方长将，则和棋。连续 120 步无吃子，和棋。",
   ].join("\n");
 }
 
-function turnPrompt(pos, records) {
+const PIECE_TYPE_ORDER = ["K", "A", "B", "N", "R", "C", "P"];
+
+export function piecesSummary(pos) {
+  const summarize = (side) => {
+    const groups = {};
+    for (let rank = 0; rank < 10; rank += 1) {
+      for (let file = 0; file < 9; file += 1) {
+        const cell = pos.board[rank][file];
+        if (!cell || cell.side !== side) continue;
+        if (!groups[cell.type]) groups[cell.type] = { name: pieceChar(cell), squares: [] };
+        groups[cell.type].squares.push(`${"abcdefghi"[file]}${rank}`);
+      }
+    }
+    const parts = PIECE_TYPE_ORDER.filter((type) => groups[type]).map((type) => {
+      const group = groups[type];
+      return group.squares.length === 1
+        ? `${group.name}${group.squares[0]}`
+        : `${group.name}×${group.squares.length}（${group.squares.join("、")}）`;
+    });
+    return `${sideName(side)}：${parts.join(" ") || "无子"}`;
+  };
+  return `${summarize("r")}\n${summarize("b")}`;
+}
+
+export function buildTurnUserMessage(pos, records, legal) {
   const round = Math.floor(records.length / 2) + 1;
-  const recent = records
-    .slice(-8)
-    .map((item) => item.notation)
-    .join(" ");
+  const last = records.length ? records[records.length - 1] : null;
+  const legalLines = legal.map((move) => `${move.iccs} ${toNotation(pos, move)}`).join("\n");
+  const opponentLine = last
+    ? `对方上一手：${last.notation}（${last.iccs}）${last.substitute ? " · 裁判代走" : ""}${last.thought ? `；想法：${last.thought}` : ""}`
+    : "这是开局第一步。";
   return [
     `第 ${round} 回合，轮到${sideName(pos.side)}。`,
-    recent ? `最近着法：${recent}` : "这是开局第一步。",
+    opponentLine,
+    `被将军：${inCheck(pos, pos.side) ? "是" : "否"}`,
     `距上次吃子 ${pos.halfmove} 步。`,
-    "请调用工具完成本步。不要只输出文字。",
+    `FEN：${toFEN(pos)}`,
+    "双方子力：",
+    piecesSummary(pos),
+    "棋盘（文件 a-i，行号即 ICCS 的数字）：",
+    asciiBoard(pos),
+    "",
+    "全部合法着法（ICCS + 中文记谱），从中选择一步提交：",
+    legalLines || "（无）",
+    "请调用 commit_move 提交，或 resign 认输。不要只输出文字。",
   ].join("\n");
+}
+
+/** 压缩时至少保留的最近完整回合数（含 tool 对） */
+export const KEEP_RECENT_TURNS = 2;
+
+const COMPACT_SYSTEM = [
+  "你是中国象棋对局的记忆压缩器，正在为同一名执棋智能体浓缩更早的对话。",
+  "请根据提供的历史，用简洁中文写出一份给未来自己的摘要，保留：",
+  "己方计划与意图、看到的威胁与战术主题、对手倾向、关键交换/失子、当前形势判断。",
+  "不要列出全部着法，不要调用工具，不要续写下一手。只输出摘要正文。",
+].join("");
+
+function cloneMessages(messages) {
+  return (messages || []).map((message) => {
+    const copy = { ...message };
+    if (message.tool_calls) copy.tool_calls = message.tool_calls.map((call) => ({ ...call, function: call.function ? { ...call.function } : call.function }));
+    if (message._meta) copy._meta = { ...message._meta };
+    return copy;
+  });
+}
+
+/** 完整保留会话（不再折叠盘面、不截断 reasoning） */
+export function packMemory(messages) {
+  return cloneMessages(messages);
+}
+
+export function rebuildMemoryFromRecords(side, records) {
+  const messages = [{ role: "system", content: systemPrompt(side) }];
+  (records || []).forEach((record, index) => {
+    if (record.side !== side) return;
+    const turnPly = index;
+    messages.push({
+      role: "user",
+      content: `（第${Math.floor(turnPly / 2) + 1}回合盘面未存档；你走了 ${record.iccs} ${record.notation}${record.substitute ? " · 裁判代走" : ""}。想法：${record.thought || "无"}）`,
+      _meta: { kind: "turn", turnPly, full: false },
+    });
+    if (record.substitute) {
+      messages.push({
+        role: "user",
+        content: `（裁判代走）因模型未有效落子，裁判替你走了 ${record.iccs} ${record.notation}。`,
+        _meta: { kind: "substitute", turnPly },
+      });
+      return;
+    }
+    const callId = `restored_${side}_${turnPly}_${record.iccs}`;
+    messages.push({
+      role: "assistant",
+      content: record.thought || "",
+      tool_calls: [
+        {
+          id: callId,
+          type: "function",
+          function: {
+            name: "commit_move",
+            arguments: JSON.stringify({ move: record.iccs, thought: record.thought || "" }),
+          },
+        },
+      ],
+    });
+    messages.push({
+      role: "tool",
+      tool_call_id: callId,
+      name: "commit_move",
+      content: `已接受 ${record.iccs} ${record.notation}`,
+    });
+  });
+  return messages;
+}
+
+function findTurnStarts(list) {
+  const starts = [];
+  for (let i = 1; i < list.length; i += 1) {
+    if (list[i].role === "user" && list[i]._meta?.kind === "turn") starts.push(i);
+  }
+  return starts;
+}
+
+function keepStartIndex(list, keepTurns = KEEP_RECENT_TURNS) {
+  const starts = findTurnStarts(list);
+  if (starts.length <= keepTurns) return 1;
+  return starts[starts.length - keepTurns];
+}
+
+function digestForCompaction(messages) {
+  return (messages || [])
+    .map((message) => {
+      const bits = [`[${message.role}]`];
+      if (message.content) bits.push(String(message.content));
+      if (typeof message.reasoning_content === "string" && message.reasoning_content) {
+        bits.push(`(reasoning) ${message.reasoning_content}`);
+      }
+      if (message.tool_calls?.length) bits.push(`(tool_calls) ${JSON.stringify(message.tool_calls)}`);
+      if (message.role === "tool") bits.push(`(tool_call_id=${message.tool_call_id}) name=${message.name || ""}`);
+      return bits.join("\n");
+    })
+    .join("\n---\n");
+}
+
+function dropUntilFit(messages, budget) {
+  let list = cloneMessages(messages);
+  let guard = 0;
+  while (messagesTokens(list) > budget && list.length > 2 && guard < 64) {
+    guard += 1;
+    const currentStart = findCurrentTurnStart(list);
+    if (currentStart <= 1) break;
+    const next = dropOldestTurn(list, currentStart);
+    if (next.length >= list.length) break;
+    list = next;
+  }
+  return sanitizeToolProtocol(list);
+}
+
+/**
+ * 阈值内：原样返回。超阈值：让模型摘要更早回合，保留最近 KEEP_RECENT_TURNS 个完整回合。
+ * 摘要失败则回退为按整回合丢弃（dropUntilFit）。
+ */
+export async function compactMessages({
+  messages,
+  contextTokens,
+  maxOutputTokens,
+  compactRequest,
+}) {
+  const budget = contextBudget(contextTokens, maxOutputTokens);
+  const list = cloneMessages(messages);
+  if (messagesTokens(list) <= budget) {
+    return { messages: list, compacted: false, fallback: false };
+  }
+  const keepFrom = keepStartIndex(list, KEEP_RECENT_TURNS);
+  const older = list.slice(1, keepFrom);
+  const recent = list.slice(keepFrom);
+  if (!older.length) {
+    return { messages: dropUntilFit(list, budget), compacted: false, fallback: true };
+  }
+  try {
+    if (typeof compactRequest !== "function") throw new Error("no compactRequest");
+    const summary = String((await compactRequest(older)) || "").trim() || "（无摘要内容）";
+    let next = [
+      list[0],
+      {
+        role: "user",
+        content: `【此前对局历史摘要——由你先前的思考压缩而成，供后续回合参考】\n${summary}`,
+        _meta: { kind: "summary" },
+      },
+      ...recent,
+    ];
+    let fallback = false;
+    if (messagesTokens(next) > budget) {
+      next = dropUntilFit(next, budget);
+      fallback = true;
+    }
+    return { messages: next, compacted: true, fallback };
+  } catch (error) {
+    return {
+      messages: dropUntilFit(list, budget),
+      compacted: false,
+      fallback: true,
+      error,
+    };
+  }
+}
+
+function stripUnmetToolCalls(result, pending) {
+  if (!pending.size || !result.length) return;
+  for (let i = result.length - 1; i >= 0; i -= 1) {
+    const message = result[i];
+    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
+    const kept = message.tool_calls.filter((call) => !pending.has(call.id));
+    if (!kept.length) {
+      const { tool_calls, ...rest } = message;
+      result[i] = rest;
+    } else if (kept.length !== message.tool_calls.length) {
+      result[i] = { ...message, tool_calls: kept };
+    }
+    break;
+  }
+}
+
+function sanitizeToolProtocol(messages) {
+  const result = [];
+  let pending = new Set();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      // 上一轮 tool_calls 尚未收齐就又来了 assistant：先削掉未完成的调用
+      stripUnmetToolCalls(result, pending);
+      const calls = message.tool_calls || [];
+      pending = new Set(calls.map((call) => call.id).filter(Boolean));
+      result.push(message);
+      continue;
+    }
+    if (message.role === "tool") {
+      if (pending.has(message.tool_call_id)) {
+        result.push(message);
+        pending.delete(message.tool_call_id);
+      }
+      continue;
+    }
+    // user / system / 其他：打断未完成的 tool 协议
+    stripUnmetToolCalls(result, pending);
+    pending = new Set();
+    result.push(message);
+  }
+  stripUnmetToolCalls(result, pending);
+  return result;
+}
+
+function findCurrentTurnStart(list) {
+  for (let i = list.length - 1; i >= 1; i -= 1) {
+    if (list[i].role === "user" && list[i]._meta?.kind === "turn") return i;
+  }
+  for (let i = list.length - 1; i >= 1; i -= 1) {
+    if (list[i].role === "user") return i;
+  }
+  return Math.min(1, Math.max(0, list.length - 1));
+}
+
+function dropOldestTurn(list, currentStart) {
+  if (currentStart <= 1) return list;
+  let start = -1;
+  for (let i = 1; i < currentStart; i += 1) {
+    if (list[i].role === "user") {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return list;
+  let end = start + 1;
+  while (end < currentStart) {
+    const message = list[end];
+    if (message.role === "user" && (message._meta?.kind === "turn" || message._meta?.kind === "substitute")) break;
+    end += 1;
+  }
+  return sanitizeToolProtocol([list[0], ...list.slice(end)]);
 }
 
 function parseArgs(text) {
@@ -182,7 +466,7 @@ function shapePlayer(raw, fallback) {
 }
 
 export class Match {
-  constructor({ settings, hooks, saved }) {
+  constructor({ settings, hooks, saved, memory }) {
     this.hooks = hooks;
     this.id = saved?.id || `m_${Date.now()}`;
     this.startedAt = saved?.startedAt || Date.now();
@@ -229,6 +513,21 @@ export class Match {
     this.echoReasoning = false;
     // 厂商不认思考强度字段时整局不再发，见 thinkingRejected
     this.dropThinking = false;
+    // 双方跨回合会话：完整保留。优先 IndexedDB 注入的 memory，其次旧存档里的 memory，否则按棋谱重建。
+    const fromIdb = memory && (Array.isArray(memory.r) || Array.isArray(memory.b));
+    const fromSaved = saved?.memory && (Array.isArray(saved.memory.r) || Array.isArray(saved.memory.b));
+    this.memory = {
+      r: fromIdb && memory.r?.length
+        ? memory.r
+        : fromSaved && saved.memory.r?.length
+          ? saved.memory.r
+          : rebuildMemoryFromRecords("r", this.records),
+      b: fromIdb && memory.b?.length
+        ? memory.b
+        : fromSaved && saved.memory.b?.length
+          ? saved.memory.b
+          : rebuildMemoryFromRecords("b", this.records),
+    };
   }
 
   providerOf(side) {
@@ -306,11 +605,24 @@ export class Match {
   }
 
   persist() {
-    this.hooks.onPersist(this.serialize());
+    // 棋谱等轻量状态进 localStorage；完整会话进 IndexedDB（经 onPersistMemory）
+    const ok = this.hooks.onPersist?.(this.serialize({ omitMemory: true }));
+    const mem = { r: packMemory(this.memory.r), b: packMemory(this.memory.b) };
+    try {
+      const result = this.hooks.onPersistMemory?.(this.id, mem);
+      if (result && typeof result.then === "function") {
+        result.catch?.(() => this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建"));
+      } else if (result === false) {
+        this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建");
+      }
+    } catch {
+      this.hooks.onMemoryWarn?.("对局记忆写入失败，刷新后可能只按棋谱重建");
+    }
+    return ok;
   }
 
-  serialize() {
-    return {
+  serialize(options = {}) {
+    const data = {
       id: this.id,
       startedAt: this.startedAt,
       temperature: this.temperature,
@@ -334,6 +646,22 @@ export class Match {
       tracePly: { ...this.tracePly },
       result: this.result,
     };
+    // 默认不把完整会话塞进 localStorage；测试 / 导出可显式 includeMemory
+    if (options.includeMemory) {
+      data.memory = { r: packMemory(this.memory.r), b: packMemory(this.memory.b) };
+    }
+    return data;
+  }
+
+  appendSubstituteNote(side, move, reason, notation, turnPly = Math.max(0, this.records.length - 1)) {
+    if (!this.memory[side]?.length) {
+      this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
+    }
+    this.memory[side].push({
+      role: "user",
+      content: `（裁判代走）因「${reason || "模型未落子"}」，裁判替你走了 ${move.iccs} ${notation}。请在后续回合基于此局面继续。`,
+      _meta: { kind: "substitute", turnPly },
+    });
   }
 
   start() {
@@ -449,6 +777,8 @@ export class Match {
             pending: false,
             ok: false,
           });
+          // 代走说明必须在 persist 之前写入 memory，否则刷新后存档里没有这条说明
+          this.appendSubstituteNote(side, move, reason, notation, turnPly);
           this.applyCommitted({
             move,
             iccs: move.iccs,
@@ -476,8 +806,8 @@ export class Match {
     // 本回合在棋谱里的序号（0 基）：日志条目带着它，回合之间就不会串位
     const turnPly = this.records.length;
     this.tracePly[side] = turnPly;
-    const baseCap = player.maxOutputTokens || 8000;
-    let cap = Math.max(baseCap, this.capFloor[side] || 0);
+    const baseCap = configuredOutputCap(player);
+    let cap = Math.min(baseCap, this.capFloor[side] > 0 ? this.capFloor[side] : baseCap);
     let hardCap = false; // 厂商拒过抬高后的上限：本回合不再抬
     this.traces[side] = [];
     this.preview = null;
@@ -486,14 +816,71 @@ export class Match {
     if (!this.turnStarted) this.turnStarted = Date.now();
     this.emit();
 
-    const legalLines = legal.map((move) => `${move.iccs} ${toNotation(this.pos, move)}`).join("\n");
-    const messages = [
-      { role: "system", content: systemPrompt(side) },
-      {
-        role: "user",
-        content: `${turnPrompt(this.pos, this.records)}\n\n全部合法着法（ICCS + 中文记谱），从中选择一步提交：\n${legalLines}`,
-      },
-    ];
+    if (!this.memory[side]?.length) {
+      this.memory[side] = [{ role: "system", content: systemPrompt(side) }];
+    }
+    const turnUser = {
+      role: "user",
+      content: buildTurnUserMessage(this.pos, this.records, legal),
+      _meta: { kind: "turn", turnPly, full: true },
+    };
+    // 回合开始前压缩：超阈值则摘要旧回合，失败则整回合丢弃；不在回合中途打断 tool 协议
+    const projected = [...this.memory[side], turnUser];
+    const budget = contextBudget(player.contextTokens, cap);
+    if (messagesTokens(projected) > budget) {
+      this.phase[side] = "压缩上下文";
+      this.emit();
+      const endpoint = this.providerOf(side);
+      const result = await compactMessages({
+        messages: this.memory[side],
+        contextTokens: player.contextTokens,
+        maxOutputTokens: cap,
+        compactRequest: async (older) => {
+          if (!endpoint?.baseUrl || !endpoint?.apiKey) throw new Error("no provider");
+          const digest = digestForCompaction(older);
+          const acc = await streamChat({
+            baseUrl: endpoint.baseUrl,
+            apiKey: endpoint.apiKey,
+            model: player.model,
+            messages: [
+              { role: "system", content: COMPACT_SYSTEM },
+              { role: "user", content: digest.slice(0, 120000) },
+            ],
+            temperature: Math.min(0.3, this.temperature),
+            maxTokens: Math.min(4096, baseCap),
+            thinking: null,
+            signal: this.controller?.signal,
+          });
+          return acc.content || "";
+        },
+      });
+      this.memory[side] = result.messages;
+      const note = result.compacted
+        ? result.fallback
+          ? "上下文已压缩（摘要后仍超限，已再丢弃旧回合）"
+          : "上下文已压缩"
+        : result.fallback
+          ? "上下文压缩失败，已丢弃旧回合"
+          : "";
+      if (note) {
+        traceAdd(this.traces[side], {
+          id: `nudge-compact-${turnPly}`,
+          ply: turnPly,
+          kind: "nudge",
+          title: "裁判",
+          body: "",
+          result: note,
+          pending: false,
+          ok: result.compacted && !result.fallback,
+        });
+        this.emit();
+      }
+    }
+    // 本回合在工作副本上推进：截断半截输出仍不回灌；成功或代走后再写回长期记忆
+    const messages = [...this.memory[side], turnUser];
+    const commitMemory = () => {
+      this.memory[side] = cloneMessages(messages);
+    };
     let failures = 0;
     let truncations = 0;
 
@@ -504,7 +891,8 @@ export class Match {
       truncations += 1;
       const givingUp = truncations > MAX_TRUNCATIONS;
       if (!hardCap) {
-        cap = Math.min(cap * 2, TRUNCATION_TOKEN_CAP);
+        // 不超过配置的输出上限，也不超过上下文窗
+        cap = Math.min(cap * 2, baseCap);
         this.capFloor[side] = cap;
       }
       traceAdd(trace, {
@@ -524,6 +912,7 @@ export class Match {
       if (givingUp) {
         this.phase[side] = "输出连续被截断";
         this.emit();
+        commitMemory();
         return { kind: "random", reason: "输出连续被截断，裁判代走" };
       }
       this.phase[side] = hardCap
@@ -550,14 +939,19 @@ export class Match {
       try {
         this.phase[side] = failures ? `重试 ${failures}/${MAX_FAILURES}` : "思考中";
         this.emit();
+        const ctxWindow = Number(player.contextTokens) > 0 ? Number(player.contextTokens) : DEFAULT_CONTEXT_TOKENS;
+        const outbound = trimMessages(messages, player.contextTokens, this.echoReasoning, cap);
+        // 请求 token + max_tokens 不得超过上下文窗（小窗口/输出≈窗口时尤其关键）
+        const room = ctxWindow - messagesTokens(outbound);
+        const sendCap = Math.max(1, Math.min(cap, room));
         acc = await streamChat({
           baseUrl: this.providerOf(side).baseUrl,
           apiKey: this.providerOf(side).apiKey,
           model: player.model,
-          messages: trimMessages(messages, player.contextTokens, this.echoReasoning),
+          messages: outbound,
           tools: TOOLS,
           temperature: this.temperature,
-          maxTokens: cap,
+          maxTokens: sendCap,
           thinking: this.dropThinking ? null : player.thinking,
           signal: this.controller.signal,
           onDelta: (delta) => {
@@ -672,6 +1066,7 @@ export class Match {
         this.phase[side] = `重试 ${failures}/${MAX_FAILURES} · 未调用工具`;
         if (failures >= MAX_FAILURES) {
           this.emit();
+          commitMemory();
           return { kind: "random", reason: "连续未调用工具，裁判代走" };
         }
         messages.push({
@@ -726,13 +1121,20 @@ export class Match {
           finished = executed.outcome;
           break;
         }
-        if (failures >= MAX_FAILURES) return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
+        if (failures >= MAX_FAILURES) {
+          commitMemory();
+          return { kind: "random", reason: executed.reason || "多次违规，裁判代走" };
+        }
       }
-      if (finished) return finished;
+      if (finished) {
+        commitMemory();
+        return finished;
+      }
       if (step >= 2) {
-        messages.push({ role: "user", content: "信息已经足够。请立刻调用 commit_move 或 resign，不要再重复查询。" });
+        messages.push({ role: "user", content: "盘面信息已经足够。请选定一步，调用 commit_move 或 resign，不必再重复查询。" });
       }
     }
+    commitMemory();
     return { kind: "random", reason: "多轮未落子，裁判代走" };
   }
 
@@ -871,7 +1273,7 @@ function messagesTokens(messages) {
 // 轮内对话逼近模型上下文时，先丢推理原文，再从最旧的一组（assistant + 其 tool 结果）开始丢。
 // echoReasoning 为真（该接口要求回传推理原文）时反过来：每条 assistant 都补齐这个字段（没有推理也要空串），
 // 只按上下文预算丢旧组。
-function trimMessages(messages, contextTokens, echoReasoning = false) {
+export function trimMessages(messages, contextTokens, echoReasoning = false, maxOutputTokens = 0) {
   let list = messages.map((message) => {
     if (message.role !== "assistant") return message;
     if (echoReasoning) {
@@ -879,13 +1281,23 @@ function trimMessages(messages, contextTokens, echoReasoning = false) {
     }
     return message.reasoning_content ? { ...message, reasoning_content: undefined } : message;
   });
-  const budget = Math.max(4096, Math.floor((Number(contextTokens) || 128000) * 0.7));
-  while (list.length > 2 && messagesTokens(list) > budget) {
-    let end = 3;
-    while (end < list.length && list[end].role === "tool") end += 1;
-    list = [list[0], list[1], ...list.slice(end)];
+  const reservedOut = Math.max(0, Number(maxOutputTokens) || 0);
+  const budget = contextBudget(contextTokens, reservedOut);
+  let guard = 0;
+  while (messagesTokens(list) > budget && list.length > 2 && guard < 64) {
+    guard += 1;
+    const currentStart = findCurrentTurnStart(list);
+    if (currentStart <= 1) break;
+    const next = dropOldestTurn(list, currentStart);
+    if (next.length >= list.length) break;
+    list = next;
   }
-  return list;
+  // 对外请求不得携带内部 _meta（部分 OpenAI 兼容接口会拒未知字段）
+  return sanitizeToolProtocol(list).map((message) => {
+    if (!message || typeof message !== "object" || !("_meta" in message)) return message;
+    const { _meta, ...rest } = message;
+    return rest;
+  });
 }
 
 function previewMove(call, legalMap) {

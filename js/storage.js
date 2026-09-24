@@ -3,6 +3,10 @@ const ACTIVE_KEY = "xq.active";
 const MATCHES_KEY = "xq.matches";
 const MATCH_LIMIT = 30;
 
+/** 新玩家 / 空字段默认：128k 上下文、32k 输出（已有存档里的数字不迁移） */
+export const DEFAULT_CONTEXT_TOKENS = 131072;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
+
 export function makeProvider(data = {}) {
   return {
     id: data.id || `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
@@ -19,8 +23,8 @@ function makePlayer(name, providerId, model) {
     model,
     // 默认不思考：推理 token 计入输出上限，思考型模型很容易把一整手的输出烧在推理里
     thinking: "off",
-    contextTokens: 128000,
-    maxOutputTokens: 8000,
+    contextTokens: DEFAULT_CONTEXT_TOKENS,
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -52,8 +56,8 @@ function normalizePlayer(saved, fallback) {
     ...fallback,
     ...(saved || {}),
     thinking,
-    contextTokens: Number(saved?.contextTokens) > 0 ? Number(saved.contextTokens) : 128000,
-    maxOutputTokens: Number(saved?.maxOutputTokens) > 0 ? Number(saved.maxOutputTokens) : 8000,
+    contextTokens: Number(saved?.contextTokens) > 0 ? Number(saved.contextTokens) : DEFAULT_CONTEXT_TOKENS,
+    maxOutputTokens: Number(saved?.maxOutputTokens) > 0 ? Number(saved.maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -114,7 +118,7 @@ export function loadActive() {
 }
 
 export function saveActive(match) {
-  write(ACTIVE_KEY, match);
+  return write(ACTIVE_KEY, match);
 }
 export function clearActive() {
   localStorage.removeItem(ACTIVE_KEY);

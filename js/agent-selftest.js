@@ -1,8 +1,23 @@
 // Agent 循环的行为测试：用假 fetch 喂固定 SSE，检查"被截断"这一类情况的处理。
 // 跑法：node js/agent-selftest.js
 import assert from "node:assert/strict";
-import { fromFEN, legalMoves, positionKey } from "./engine.js";
-import { Match, resolveAfterMove } from "./match.js";
+import { fromFEN, legalMoves, positionKey, startingPosition } from "./engine.js";
+import {
+  Match,
+  resolveAfterMove,
+  systemPrompt,
+  buildTurnUserMessage,
+  piecesSummary,
+  trimMessages,
+  rebuildMemoryFromRecords,
+  contextBudget,
+  CONTEXT_COMPRESS_RATIO,
+  compactMessages,
+  KEEP_RECENT_TURNS,
+  packMemory,
+} from "./match.js";
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
+import { saveGameMemory, loadGameMemory, resetMemoryStoreForTests } from "./memory-store.js";
 
 const encoder = new TextEncoder();
 
@@ -104,9 +119,9 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     reasoning("我在想……先比较一下马八进七和炮二平五，然后……", "length"),
     toolCall("commit_move", { move: "b0c2", thought: "马八进七" }),
   ]);
-  assert.equal(outcome.kind, "move", "抬高上限后应当能落子");
+  assert.equal(outcome.kind, "move", "截断重试后应当能落子");
   assert.equal(outcome.iccs, "b0c2");
-  assert.deepEqual(caps(), [8000, 16000], "截断后重发要把输出上限翻倍");
+  assert.deepEqual(caps(), [8000, 8000], "截断重试不得超过配置的输出上限");
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截分析不许回灌历史");
   assert.match(requests[1].messages.at(-1).content, /截断/, "重发时要明确告知上一轮被截断");
 }
@@ -120,7 +135,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     reasoning("长分析四", "length"),
   ]);
   assert.deepEqual(outcome, { kind: "random", reason: "输出连续被截断，裁判代走" });
-  assert.deepEqual(caps(), [8000, 16000, 32000], "最多抬高两次就该收手");
+  assert.deepEqual(caps(), [8000, 8000, 8000], "最多重试两次且不得超过配置上限");
 }
 
 // 4) 工具参数被截断（半截 JSON）同样按截断处理，不算违规
@@ -130,7 +145,7 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ]);
   assert.equal(outcome.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000]);
+  assert.deepEqual(caps(), [8000, 8000]);
   assert.equal(requests[1].messages.some((message) => message.role === "assistant"), false, "半截工具调用不许回灌历史");
 }
 
@@ -155,27 +170,27 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
   requests = [];
   const first = await match.playTurn();
   assert.equal(first.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000]);
+  assert.deepEqual(caps(), [8000, 8000]);
   requests = [];
   script = [toolCall("commit_move", { move: "b0c2", thought: "马八进七" })];
   const second = await match.playTurn();
   assert.equal(second.kind, "move");
-  assert.deepEqual(caps(), [16000], "下一回合应当从上一次抬高后的上限起步");
+  assert.deepEqual(caps(), [8000], "下一回合仍受配置输出上限约束");
 }
 
-// 7) 厂商把抬高的上限 400 拒掉时不许把整局打挂：退回原上限、继续下
+// 7) 厂商把过高的输出上限 400 拒掉时不许把整局打挂：压档后继续下
 {
   script = [
-    reasoning("想很久", "length"),
-    httpError(400, "max_tokens is too large: 16000"),
+    httpError(400, "max_tokens is too large: 32768"),
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ];
   requests = [];
-  const match = makeMatch();
+  const match = makeMatch(32768);
   const outcome = await match.playTurn();
-  assert.equal(outcome.kind, "move", "被 400 拒绝后仍要在原上限下把这一步走完");
-  assert.deepEqual(caps(), [8000, 16000, 8000], "退回原上限重发，而不是一路抬高");
-  assert.match(match.traces.r.find((item) => item.id === "nudge-1").result, /压到 8k/);
+  assert.equal(outcome.kind, "move", "被 400 拒绝后仍要把这一步走完");
+  assert.equal(caps()[0], 32768);
+  assert.ok(caps()[1] < 32768, "应压到更低档位重发");
+  assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到/);
 }
 
 // 8) DeepSeek 官方带 tools 时要求回传推理原文：先 400 一次，认出后整局都带上
@@ -204,9 +219,12 @@ const roles = (index) => requests[index].messages.map((message) => message.role)
     body.max_tokens > 8192
       ? httpError(400, "max_tokens is too large, maximum is 8192")
       : toolCall("commit_move", { move: "h2e2", thought: "炮二平五" });
+  // 输出上限不得超上下文窗：200k 配置在 128k 窗口下会被收成 128k
   const { match, outcome } = await play([strict, strict], 200000);
   assert.equal(outcome.kind, "move", "压到硬顶之后要把这一步走完");
-  assert.deepEqual(caps(), [200000, 8192], "一次就要压到常见硬顶，别一步步折半烧步骤");
+  assert.equal(caps()[0] <= 128000, true, "先受上下文窗约束（还要给 prompt 留位）");
+  assert.ok(caps()[0] > 100000, "大窗口下输出上限应接近窗宽");
+  assert.equal(caps()[1], 8192, "再一次压到常见硬顶");
   assert.match(match.traces.r.map((item) => item.result || "").join(" "), /压到 8k/);
 }
 
@@ -346,7 +364,7 @@ console.log("agent loop ok");
     toolCall("commit_move", { move: "h2e2", thought: "炮二平五" }),
   ]);
   assert.equal(outcome.kind, "move");
-  assert.deepEqual(caps(), [8000, 16000], "JSON 路径的 length 也要抬高上限重发");
+  assert.deepEqual(caps(), [8000, 8000], "JSON 路径的 length 也要重发且不超过配置上限");
 }
 
 // 17) 裁判代走要打上 substitute 标记；旧存档无该字段仍可恢复
@@ -418,4 +436,312 @@ console.log("agent loop ok");
   assert.equal(outcome.iccs, "b0c2", "新 id 缺 index 时应开新槽");
 }
 
+
+// ---------- 盘面上下文与跨回合记忆（harness 风格：原文保留 + 阈值摘要） ----------
+
+// 20) 回合用户消息含盘面 / 子力 / FEN / 合法着法；系统提示去掉 150 字限制
+{
+  const pos = startingPosition();
+  const legal = legalMoves(pos);
+  const body = buildTurnUserMessage(pos, [], legal);
+  assert.match(body, /FEN：/);
+  assert.match(body, /双方子力/);
+  assert.match(body, /帅e0|帅/);
+  assert.match(body, /棋盘（文件 a-i/);
+  assert.match(body, /全部合法着法/);
+  assert.match(body, /h2e2/);
+  assert.match(piecesSummary(pos), /红方：/);
+  const sys = systemPrompt("r");
+  assert.equal(/150\s*字/.test(sys), false, "系统提示不得再限制 150 字");
+  assert.match(sys, /将杀|将军/);
+}
+
+// 21) 同方两回合：第二次请求带上第一回合原文；旧盘面不再折叠
+{
+  const match = makeMatch();
+  script = [toolCall("commit_move", { move: "h2e2", thought: "先开中炮试探" })];
+  requests = [];
+  const first = await match.playTurn();
+  assert.equal(first.kind, "move");
+  match.applyCommitted(first);
+  assert.match(requests[0].messages.find((m) => m.role === "user").content, /棋盘（文件/);
+  script = [toolCall("commit_move", { move: "h7e7", thought: "对中炮" })];
+  requests = [];
+  const black = await match.playTurn();
+  assert.equal(black.kind, "move");
+  match.applyCommitted(black);
+  script = [toolCall("commit_move", { move: "b0c2", thought: "马八进七接续" })];
+  requests = [];
+  const second = await match.playTurn();
+  assert.equal(second.kind, "move");
+  const msgs = requests[0].messages;
+  assert.equal(msgs[0].role, "system");
+  const users = msgs.filter((m) => m.role === "user" && m.content.includes("全部合法着法"));
+  assert.ok(users.length >= 2, "应至少有两个完整盘面用户消息");
+  assert.equal(
+    msgs.some((m) => m.role === "user" && /盘面与合法着法已省略|盘面已省略/.test(m.content || "")),
+    false,
+    "不得再折叠旧盘面",
+  );
+  const hasPriorTool = msgs.some(
+    (m) => m.role === "assistant" && JSON.stringify(m.tool_calls || []).includes("h2e2"),
+  );
+  assert.equal(hasPriorTool, true, "第二回合应带上此前着法");
+  assert.equal(msgs.every((m) => !("_meta" in m)), true, "出站不得带 _meta");
+}
+
+// 22) packMemory 原样保留 reasoning_content 与长盘面
+{
+  const longBoard = "棋盘".repeat(500);
+  const packed = packMemory([
+    {
+      role: "assistant",
+      content: longBoard,
+      reasoning_content: "R".repeat(2500),
+      tool_calls: [{ id: "c1", type: "function", function: { name: "commit_move", arguments: "{}" } }],
+    },
+  ]);
+  assert.equal(packed[0].content.length, longBoard.length);
+  assert.equal(packed[0].reasoning_content.length, 2500);
+}
+
+// 23) trimMessages：扣减 maxOutputTokens；不丢 system/当前回合；不留孤儿 tool；剥 _meta
+{
+  const sys = { role: "system", content: "system" };
+  const oldUser = {
+    role: "user",
+    content: "old " + "盘面".repeat(2000),
+    _meta: { kind: "turn", turnPly: 0, full: true },
+  };
+  const oldAsst = {
+    role: "assistant",
+    content: "分析",
+    tool_calls: [{ id: "c_old", type: "function", function: { name: "commit_move", arguments: "{}" } }],
+  };
+  const oldTool = { role: "tool", tool_call_id: "c_old", name: "commit_move", content: "ok" };
+  const curUser = {
+    role: "user",
+    content: "current-turn-marker " + "现".repeat(50),
+    _meta: { kind: "turn", turnPly: 2, full: true },
+  };
+  const curAsst = {
+    role: "assistant",
+    content: "now",
+    tool_calls: [
+      { id: "c_new", type: "function", function: { name: "look_board", arguments: "{}" } },
+      { id: "c_miss", type: "function", function: { name: "legal_moves", arguments: "{}" } },
+    ],
+  };
+  const curTool = { role: "tool", tool_call_id: "c_new", name: "look_board", content: "board" };
+  const orphan = { role: "tool", tool_call_id: "ghost", name: "legal_moves", content: "orphan" };
+  const trimmed = trimMessages(
+    [sys, oldUser, oldAsst, oldTool, curUser, curAsst, curTool, orphan],
+    8000,
+    false,
+    7000,
+  );
+  assert.equal(trimmed[0].role, "system");
+  assert.ok(trimmed.some((m) => /current-turn-marker/.test(m.content || "")));
+  assert.equal(trimmed.some((m) => m.role === "tool" && m.tool_call_id === "ghost"), false);
+  assert.equal(trimmed.some((m) => m.role === "user" && m.content.startsWith("old ")), false);
+  assert.ok(trimmed.some((m) => m.role === "tool" && m.tool_call_id === "c_new"));
+  const asst = trimmed.find((m) => m.role === "assistant" && (m.content || "") === "now");
+  assert.deepEqual((asst?.tool_calls || []).map((c) => c.id), ["c_new"]);
+  assert.equal(trimmed.every((m) => !("_meta" in m)), true);
+}
+
+// 24) 恢复：IndexedDB 记忆优先；旧 localStorage memory 次之；皆无则按 records 重建
+{
+  resetMemoryStoreForTests();
+  const match = makeMatch();
+  script = [toolCall("commit_move", { move: "h2e2", thought: "开局炮" })];
+  const first = await match.playTurn();
+  match.applyCommitted(first);
+  const saved = match.serialize({ includeMemory: true });
+  assert.ok(saved.memory?.r?.length >= 2, "显式 includeMemory 时应带上红方记忆");
+  await saveGameMemory(saved.id, { r: saved.memory.r, b: saved.memory.b || [] });
+  const fromIdb = await loadGameMemory(saved.id);
+  assert.ok(fromIdb.r.some((m) => m.role === "assistant"));
+
+  const restored = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: { ...saved, memory: undefined },
+    memory: fromIdb,
+  });
+  assert.ok(restored.memory.r.some((m) => m.role === "assistant"));
+
+  const legacy = { ...saved };
+  const fromLegacy = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: legacy,
+  });
+  assert.equal(fromLegacy.records[0].iccs, "h2e2");
+  assert.ok(fromLegacy.memory.r.length >= 2);
+
+  const bare = { ...saved };
+  delete bare.memory;
+  const fromBare = new Match({
+    settings: {
+      providers: [{ id: "p", name: "stub", baseUrl: "https://stub.test/v1", apiKey: "k" }],
+      temperature: 0.4,
+      mainMinutes: 60,
+      incrementSeconds: 60,
+      red: match.players.r,
+      black: match.players.b,
+    },
+    hooks: match.hooks,
+    saved: bare,
+  });
+  assert.equal(fromBare.memory.r[0].role, "system");
+  assert.ok(fromBare.memory.r.some((m) => m.role === "tool" && /h2e2/.test(m.content || "")));
+  const rebuilt = rebuildMemoryFromRecords("r", bare.moves);
+  assert.equal(rebuilt[0].role, "system");
+}
+
+// 25) 压缩阈值数学
+{
+  assert.equal(CONTEXT_COMPRESS_RATIO, 0.8);
+  assert.equal(DEFAULT_CONTEXT_TOKENS, 131072);
+  assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 32768);
+  assert.equal(KEEP_RECENT_TURNS, 2);
+  const def = contextBudget(DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS);
+  assert.equal(def, 98304);
+  assert.ok(def + DEFAULT_MAX_OUTPUT_TOKENS <= DEFAULT_CONTEXT_TOKENS);
+}
+
+// 26) compactMessages：超阈值时摘要替换旧回合，保留最近回合与 tool 对
+{
+  function turn(ply, reps) {
+    return [
+      { role: "user", content: "盘".repeat(reps) + " ply" + ply, _meta: { kind: "turn", turnPly: ply } },
+      {
+        role: "assistant",
+        content: "想" + ply,
+        reasoning_content: "R".repeat(100),
+        tool_calls: [{ id: "c" + ply, type: "function", function: { name: "commit_move", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c" + ply, name: "commit_move", content: "ok" + ply },
+    ];
+  }
+  const messages = [{ role: "system", content: "sys" }, ...turn(0, 2000), ...turn(2, 2000), ...turn(4, 80), ...turn(6, 80)];
+  let sawOlder = 0;
+  const result = await compactMessages({
+    messages,
+    contextTokens: 2500,
+    maxOutputTokens: 500,
+    compactRequest: async (older) => {
+      sawOlder = older.length;
+      return "红方中炮，黑方对攻，互兑一马。";
+    },
+  });
+  assert.equal(result.compacted, true);
+  assert.equal(result.fallback, false);
+  assert.ok(sawOlder >= 3);
+  assert.ok(result.messages.some((m) => /【此前对局历史摘要/.test(m.content || "")));
+  assert.ok(result.messages.some((m) => m.role === "tool" && m.tool_call_id === "c6"));
+  assert.equal(result.messages.some((m) => m.role === "tool" && m.tool_call_id === "c0"), false, "最旧回合应已被摘要替换");
+}
+
+// 27) compactMessages 失败时回退丢弃旧回合
+{
+  function turn(ply, reps) {
+    return [
+      { role: "user", content: "盘".repeat(reps) + " ply" + ply, _meta: { kind: "turn", turnPly: ply } },
+      {
+        role: "assistant",
+        content: "想" + ply,
+        tool_calls: [{ id: "c" + ply, type: "function", function: { name: "commit_move", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c" + ply, name: "commit_move", content: "ok" + ply },
+    ];
+  }
+  const messages = [{ role: "system", content: "sys" }, ...turn(0, 2000), ...turn(2, 2000), ...turn(4, 80), ...turn(6, 80)];
+  const result = await compactMessages({
+    messages,
+    contextTokens: 2500,
+    maxOutputTokens: 500,
+    compactRequest: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(result.compacted, false);
+  assert.equal(result.fallback, true);
+  assert.equal(result.messages[0].role, "system");
+  assert.ok(result.messages.length < messages.length);
+}
+
+// 28) 出站剥 _meta；半截 tool_calls 削干净
+{
+  const msgs = [
+    { role: "system", content: "s" },
+    { role: "user", content: "turn", _meta: { kind: "turn", turnPly: 0, full: true } },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "a", type: "function", function: { name: "commit_move", arguments: "{}" } },
+        { id: "b", type: "function", function: { name: "look_board", arguments: "{}" } },
+      ],
+    },
+    { role: "tool", tool_call_id: "a", name: "commit_move", content: "ok" },
+    { role: "user", content: "next", _meta: { kind: "turn", turnPly: 2, full: true } },
+  ];
+  const out = trimMessages(msgs, 128000, false, 8000);
+  assert.equal(out.every((m) => !("_meta" in m)), true);
+  const asst = out.find((m) => m.role === "assistant");
+  assert.deepEqual((asst.tool_calls || []).map((c) => c.id), ["a"]);
+}
+
+// 29) persist 默认不把 memory 写入 localStorage 快照；includeMemory 仍可用
+{
+  const match = makeMatch();
+  match.memory.r.push({ role: "user", content: "x", _meta: { kind: "turn", turnPly: 0 } });
+  const light = match.serialize();
+  assert.equal("memory" in light, false, "默认序列化不含 memory");
+  const full = match.serialize({ includeMemory: true });
+  assert.ok(full.memory.r.length >= 2);
+}
+
+// 30) 裁判代走说明在 persist 之前写入 memory
+{
+  const snapshots = [];
+  const memWrites = [];
+  const match = makeMatch();
+  match.hooks.onPersist = (data) => {
+    snapshots.push(data);
+    return true;
+  };
+  match.hooks.onPersistMemory = (_id, mem) => {
+    memWrites.push(mem);
+    return true;
+  };
+  const legal = legalMoves(match.pos);
+  const move = legal[0];
+  const turnPly = match.records.length;
+  match.appendSubstituteNote("r", move, "测", "测试着", turnPly);
+  match.applyCommitted({ move, iccs: move.iccs, thought: "裁判代走（测）", substitute: true });
+  assert.ok(memWrites.length >= 1);
+  const blob = JSON.stringify(memWrites[memWrites.length - 1]);
+  assert.match(blob, /裁判代走/);
+}
+
 console.log("agent regressions ok");
+console.log("board memory ok");
+console.log("context budget ok");
+console.log("compaction ok");

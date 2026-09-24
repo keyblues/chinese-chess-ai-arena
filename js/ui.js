@@ -1,4 +1,5 @@
 import { resultText } from "./match.js";
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS } from "./storage.js";
 
 // 横置棋盘：黑在上手（左），红在下手（右）。
 // 列 = 纵线（由 9 路…0 路自左向右），行 = 文件线（a…i 自上而下）。
@@ -612,8 +613,8 @@ export function createUI(callbacks) {
       document.querySelector(`#${side}-provider`).value = player.providerId || "";
       document.querySelector(`#${side}-model`).value = player.model || "";
       document.querySelector(`#${side}-thinking`).value = player.thinking || "off";
-      document.querySelector(`#${side}-context`).value = player.contextTokens ?? 128000;
-      document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? 8000;
+      document.querySelector(`#${side}-context`).value = player.contextTokens ?? DEFAULT_CONTEXT_TOKENS;
+      document.querySelector(`#${side}-maxout`).value = player.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     });
   }
 
@@ -627,8 +628,8 @@ export function createUI(callbacks) {
       providerId: document.querySelector(`#${prefix}-provider`).value,
       model: document.querySelector(`#${prefix}-model`).value.trim(),
       thinking: document.querySelector(`#${prefix}-thinking`).value || "off",
-      contextTokens: number(`#${prefix}-context`, 128000, 1024),
-      maxOutputTokens: number(`#${prefix}-maxout`, 8000, 256),
+      contextTokens: number(`#${prefix}-context`, DEFAULT_CONTEXT_TOKENS, 1024),
+      maxOutputTokens: number(`#${prefix}-maxout`, DEFAULT_MAX_OUTPUT_TOKENS, 256),
     });
     return {
       providers: collectProviders(),
