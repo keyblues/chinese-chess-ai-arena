@@ -107,20 +107,34 @@ export function formatFetchError(error) {
   return error instanceof Error ? error : new Error(message);
 }
 
+function normalizeArguments(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function accumulate(acc, delta) {
   if (!delta) return;
   if (typeof delta.reasoning_content === "string") acc.reasoning += delta.reasoning_content;
   if (typeof delta.reasoning === "string") acc.reasoning += delta.reasoning;
   if (typeof delta.content === "string") acc.content += delta.content;
   for (const call of delta.tool_calls || []) {
-    const index = call.index ?? acc.toolCalls.length;
+    // 缺 index 时接到已有最后一槽（没有则 0），避免把同一次调用拆成两段
+    let index = call.index;
+    if (index == null || !Number.isFinite(index)) {
+      index = acc.toolCalls.length ? acc.toolCalls.length - 1 : 0;
+      while (index > 0 && !acc.toolCalls[index]) index -= 1;
+    }
     if (!acc.toolCalls[index]) acc.toolCalls[index] = { index, id: "", name: "", arguments: "" };
     const item = acc.toolCalls[index];
     if (call.id) item.id = call.id;
     if (call.function?.name) item.name = mergeDelta(item.name, String(call.function.name));
     if (call.function?.arguments != null) {
-      const next = typeof call.function.arguments === "string" ? call.function.arguments : JSON.stringify(call.function.arguments);
-      item.arguments = mergeDelta(item.arguments, next);
+      item.arguments = mergeDelta(item.arguments, normalizeArguments(call.function.arguments));
     }
   }
 }
@@ -141,14 +155,16 @@ async function readStream(response, onDelta, markData) {
     markData?.();
     const json = await response.json();
     if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
-    const message = json.choices?.[0]?.message || {};
+    const choice = json.choices?.[0] || {};
+    const message = choice.message || {};
+    if (choice.finish_reason) acc.finishReason = choice.finish_reason;
     accumulate(acc, message);
     if (message.tool_calls) {
       acc.toolCalls = message.tool_calls.map((call, index) => ({
         index,
         id: call.id || "",
         name: call.function?.name || "",
-        arguments: call.function?.arguments || "",
+        arguments: normalizeArguments(call.function?.arguments),
       }));
     }
     onDelta?.(snapshot(acc));
@@ -342,7 +358,8 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
         if (isTransientMessage(message)) throw new TransientError(message);
         throw new Error(message);
       }
-      const message = json.choices?.[0]?.message || {};
+      const choice = json.choices?.[0] || {};
+      const message = choice.message || {};
       const acc = {
         content: message.content || "",
         reasoning: message.reasoning_content || message.reasoning || "",
@@ -350,8 +367,9 @@ async function streamChatOnce({ baseUrl, apiKey, model, messages, tools, tempera
           index,
           id: call.id || "",
           name: call.function?.name || "",
-          arguments: call.function?.arguments || "",
+          arguments: normalizeArguments(call.function?.arguments),
         })),
+        finishReason: choice.finish_reason || undefined,
       };
       onDelta?.(snapshot(acc));
       return acc;

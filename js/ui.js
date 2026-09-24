@@ -262,6 +262,13 @@ export function createUI(callbacks) {
       no.className = "no";
       no.textContent = String(Math.floor(i / 2) + 1);
       button.append(no, document.createTextNode(moves[i].notation));
+      if (moves[i].substitute) {
+        const tag = document.createElement("span");
+        tag.className = "sub";
+        tag.textContent = "裁判代走";
+        tag.title = moves[i].thought || "裁判代走";
+        button.append(tag);
+      }
       button.addEventListener("click", () => callbacks.onPly?.(i + 1));
       li.append(button);
       list.append(li);
